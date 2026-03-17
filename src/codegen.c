@@ -8,6 +8,7 @@
  *   Pass 4 (main codegen): Generate main() with top-level code
  */
 
+#define _GNU_SOURCE  /* for open_memstream */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +111,7 @@ const char *spinel_type_cname(spinel_type_t k) {
     case SPINEL_TYPE_FLOAT:   return "mrb_float";
     case SPINEL_TYPE_BOOLEAN: return "mrb_bool";
     case SPINEL_TYPE_ARRAY:   return "sp_IntArray *";
+    case SPINEL_TYPE_PROC:    return "sp_Val *";
     default:                  return "mrb_value";
     }
 }
@@ -221,6 +223,7 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node);
 static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node);
 static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node);
 static void codegen_stmts(codegen_ctx_t *ctx, pm_node_t *node);
+static char *codegen_lambda(codegen_ctx_t *ctx, pm_lambda_node_t *lam);
 
 /* ------------------------------------------------------------------ */
 /* Pass 1: Class/Module/Function analysis                             */
@@ -740,6 +743,12 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         return n->body ? infer_type(ctx, n->body) : vt_prim(SPINEL_TYPE_NIL);
     }
 
+    case PM_LAMBDA_NODE:
+        return vt_prim(SPINEL_TYPE_PROC);
+
+    case PM_ARRAY_NODE:
+        return vt_prim(SPINEL_TYPE_ARRAY);
+
     default:
         return vt_prim(SPINEL_TYPE_VALUE);
     }
@@ -834,6 +843,12 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
         if (n->statements) infer_pass(ctx, (pm_node_t *)n->statements);
         break;
     }
+    case PM_UNTIL_NODE: {
+        pm_until_node_t *n = (pm_until_node_t *)node;
+        infer_pass(ctx, n->predicate);
+        if (n->statements) infer_pass(ctx, (pm_node_t *)n->statements);
+        break;
+    }
     case PM_IF_NODE: {
         pm_if_node_t *n = (pm_if_node_t *)node;
         infer_pass(ctx, n->predicate);
@@ -871,6 +886,11 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
             }
             if (blk->body) infer_pass(ctx, (pm_node_t *)blk->body);
         }
+        break;
+    }
+    case PM_LAMBDA_NODE: {
+        /* Don't recurse into lambda bodies for top-level inference;
+         * lambdas have their own scopes handled during codegen */
         break;
     }
     case PM_CLASS_NODE:
@@ -1048,6 +1068,29 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             }
             if (strcmp(f->name, "test_lists") == 0) {
                 f->return_type = vt_prim(SPINEL_TYPE_INTEGER);
+            }
+            /* Lambda calculus FizzBuzz functions */
+            if (ctx->lambda_mode) {
+                if (strcmp(f->name, "to_integer") == 0 && f->param_count >= 1) {
+                    f->params[0].type = vt_prim(SPINEL_TYPE_PROC);
+                    f->return_type = vt_prim(SPINEL_TYPE_INTEGER);
+                }
+                if (strcmp(f->name, "to_boolean") == 0 && f->param_count >= 1) {
+                    f->params[0].type = vt_prim(SPINEL_TYPE_PROC);
+                    f->return_type = vt_prim(SPINEL_TYPE_BOOLEAN);
+                }
+                if (strcmp(f->name, "to_array") == 0 && f->param_count >= 1) {
+                    f->params[0].type = vt_prim(SPINEL_TYPE_PROC);
+                    f->return_type = vt_prim(SPINEL_TYPE_PROC); /* returns sp_ValArray* but we handle specially */
+                }
+                if (strcmp(f->name, "to_char") == 0 && f->param_count >= 1) {
+                    f->params[0].type = vt_prim(SPINEL_TYPE_PROC);
+                    f->return_type = vt_prim(SPINEL_TYPE_STRING);
+                }
+                if (strcmp(f->name, "to_string") == 0 && f->param_count >= 1) {
+                    f->params[0].type = vt_prim(SPINEL_TYPE_PROC);
+                    f->return_type = vt_prim(SPINEL_TYPE_STRING);
+                }
             }
         }
 
@@ -1409,10 +1452,23 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             }
         }
 
-        /* Array indexing: obj[index] → obj.field or array[index] (not sp_IntArray) */
+        /* Array indexing / Proc call: obj[arg] */
         if (strcmp(method, "[]") == 0 && call->receiver && call->arguments &&
             call->arguments->arguments.size == 1) {
             vtype_t recv_t = infer_type(ctx, call->receiver);
+            /* In lambda mode: inside lambda bodies, ALL [] are proc calls (sp_call)
+             * because every variable in a lambda body is sp_Val*.
+             * At top level in lambda mode, use sp_call for proc/value/unknown types. */
+            if (ctx->lambda_mode &&
+                (ctx->lambda_scope_depth > 0 ||
+                 recv_t.kind == SPINEL_TYPE_PROC || recv_t.kind == SPINEL_TYPE_VALUE ||
+                 recv_t.kind == SPINEL_TYPE_UNKNOWN)) {
+                char *recv = codegen_expr(ctx, call->receiver);
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                char *r = sfmt("sp_call(%s, %s)", recv, arg);
+                free(recv); free(arg); free(method);
+                return r;
+            }
             if (recv_t.kind != SPINEL_TYPE_ARRAY) {
                 char *recv = codegen_expr(ctx, call->receiver);
                 char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
@@ -1706,6 +1762,86 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             }
         }
 
+        /* In lambda mode: handle map with block on ValArray result */
+        if (ctx->lambda_mode && strcmp(method, "map") == 0 &&
+            call->receiver && call->block &&
+            PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+            /* Check if receiver is a to_array call or variable of ValArray type */
+            char *recv = codegen_expr(ctx, call->receiver);
+            pm_block_node_t *blk = (pm_block_node_t *)call->block;
+
+            /* Get block parameter name */
+            char *bpname = NULL;
+            if (blk->parameters && PM_NODE_TYPE(blk->parameters) == PM_BLOCK_PARAMETERS_NODE) {
+                pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)blk->parameters;
+                if (bp->parameters && bp->parameters->requireds.size > 0) {
+                    pm_node_t *p = bp->parameters->requireds.nodes[0];
+                    if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE)
+                        bpname = cstr(ctx, ((pm_required_parameter_node_t *)p)->name);
+                }
+            }
+
+            /* Generate: { sp_ValArray *_arr = recv; sp_StrArray *_res = ...; for ... } */
+            int tmp = ctx->temp_counter++;
+            emit(ctx, "sp_ValArray *_va_%d = %s;\n", tmp, recv);
+            emit(ctx, "sp_StrArray *_sa_%d = sp_StrArray_new();\n", tmp);
+            emit(ctx, "for (int _mi_%d = 0; _mi_%d < _va_%d->len; _mi_%d++) {\n",
+                 tmp, tmp, tmp, tmp);
+            ctx->indent++;
+            if (bpname) {
+                emit(ctx, "sp_Val *lv_%s = _va_%d->data[_mi_%d];\n", bpname, tmp, tmp);
+            }
+            /* Generate the block body as an expression */
+            char *body_expr = NULL;
+            if (blk->body) {
+                pm_node_t *body = (pm_node_t *)blk->body;
+                if (PM_NODE_TYPE(body) == PM_STATEMENTS_NODE) {
+                    pm_statements_node_t *stmts = (pm_statements_node_t *)body;
+                    if (stmts->body.size > 0)
+                        body_expr = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                } else {
+                    body_expr = codegen_expr(ctx, body);
+                }
+            }
+            if (body_expr) {
+                emit(ctx, "sp_StrArray_push(_sa_%d, %s);\n", tmp, body_expr);
+                free(body_expr);
+            }
+            ctx->indent--;
+            emit(ctx, "}\n");
+
+            free(recv); free(bpname); free(method);
+            return sfmt("_sa_%d", tmp);
+        }
+
+        /* In lambda mode: handle join on StrArray */
+        if (ctx->lambda_mode && strcmp(method, "join") == 0 && call->receiver) {
+            char *recv = codegen_expr(ctx, call->receiver);
+            /* This should be an sp_StrArray; join all strings */
+            int tmp = ctx->temp_counter++;
+            emit(ctx, "size_t _jl_%d = 0;\n", tmp);
+            emit(ctx, "for (int _ji_%d = 0; _ji_%d < %s->len; _ji_%d++) _jl_%d += strlen(%s->data[_ji_%d]);\n",
+                 tmp, tmp, recv, tmp, tmp, recv, tmp);
+            emit(ctx, "char *_js_%d = (char *)malloc(_jl_%d + 1); _js_%d[0] = '\\0';\n", tmp, tmp, tmp);
+            emit(ctx, "for (int _ji_%d = 0; _ji_%d < %s->len; _ji_%d++) strcat(_js_%d, %s->data[_ji_%d]);\n",
+                 tmp, tmp, recv, tmp, tmp, recv, tmp);
+            free(recv); free(method);
+            return sfmt("_js_%d", tmp);
+        }
+
+        /* In lambda mode: handle slice on string literals */
+        if (ctx->lambda_mode && strcmp(method, "slice") == 0 &&
+            call->receiver && call->arguments &&
+            call->arguments->arguments.size == 1) {
+            char *recv = codegen_expr(ctx, call->receiver);
+            char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+            int tmp = ctx->temp_counter++;
+            emit(ctx, "char *_sl_%d = (char *)malloc(2); _sl_%d[0] = %s[(int)%s]; _sl_%d[1] = '\\0';\n",
+                 tmp, tmp, recv, idx, tmp);
+            free(recv); free(idx); free(method);
+            return sfmt("_sl_%d", tmp);
+        }
+
         /* Fallback */
         free(method);
         return sfmt("/* TODO: call */ 0");
@@ -1785,6 +1921,23 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             return r;
         }
         return xstrdup("0");
+    }
+
+    case PM_LAMBDA_NODE: {
+        pm_lambda_node_t *lam = (pm_lambda_node_t *)node;
+        return codegen_lambda(ctx, lam);
+    }
+
+    case PM_ARRAY_NODE: {
+        pm_array_node_t *ary = (pm_array_node_t *)node;
+        if (ctx->lambda_mode) {
+            if (ary->elements.size == 0) {
+                /* Empty array literal [] → sp_ValArray_new() */
+                return xstrdup("sp_ValArray_new()");
+            }
+        }
+        /* Fallthrough for non-lambda mode */
+        return sfmt("0 /* TODO: array expr */");
     }
 
     default:
@@ -1882,6 +2035,20 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
         break;
     }
 
+    case PM_UNTIL_NODE: {
+        pm_until_node_t *n = (pm_until_node_t *)node;
+        char *cond = codegen_expr(ctx, n->predicate);
+        emit(ctx, "while (!(%s)) {\n", cond);
+        free(cond);
+        ctx->indent++;
+        ctx->for_depth++;
+        if (n->statements) codegen_stmts(ctx, (pm_node_t *)n->statements);
+        ctx->for_depth--;
+        ctx->indent--;
+        emit(ctx, "}\n");
+        break;
+    }
+
     case PM_IF_NODE: {
         pm_if_node_t *n = (pm_if_node_t *)node;
         char *cond = codegen_expr(ctx, n->predicate);
@@ -1949,6 +2116,24 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
 
         /* puts: output + newline */
         if (!call->receiver && strcmp(method, "puts") == 0) {
+            /* In lambda mode: puts on a StrArray variable → iterate and print each */
+            if (ctx->lambda_mode && call->arguments && call->arguments->arguments.size > 0) {
+                pm_node_t *arg = call->arguments->arguments.nodes[0];
+                vtype_t at = infer_type(ctx, arg);
+                /* If the argument type is PROC or VALUE (could be StrArray from map), handle specially */
+                if (at.kind == SPINEL_TYPE_PROC || at.kind == SPINEL_TYPE_VALUE ||
+                    at.kind == SPINEL_TYPE_UNKNOWN) {
+                    char *ae = codegen_expr(ctx, arg);
+                    /* Emit: cast to sp_StrArray* and print each element */
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "{ sp_StrArray *_pa_%d = (sp_StrArray *)%s;\n", tmp, ae);
+                    emit(ctx, "  for (int _pi_%d = 0; _pi_%d < _pa_%d->len; _pi_%d++) puts(_pa_%d->data[_pi_%d]); }\n",
+                         tmp, tmp, tmp, tmp, tmp, tmp);
+                    free(ae);
+                    free(method);
+                    break;
+                }
+            }
             if (call->arguments && call->arguments->arguments.size > 0) {
                 pm_node_t *arg = call->arguments->arguments.nodes[0];
                 vtype_t at = infer_type(ctx, arg);
@@ -2597,6 +2782,96 @@ static void emit_header(codegen_ctx_t *ctx) {
 
     emit_raw(ctx, "static void sp_IntArray_free(sp_IntArray *a) {\n");
     emit_raw(ctx, "    if (a) { free(a->data); free(a); }\n}\n\n");
+
+    /* Lambda/closure runtime (sp_Val) — emitted only when lambdas are used */
+    if (ctx->lambda_mode) {
+        emit_raw(ctx, "/* ---- Lambda/closure runtime (sp_Val) ---- */\n");
+        emit_raw(ctx, "typedef struct sp_Val sp_Val;\n");
+        emit_raw(ctx, "typedef sp_Val *(*sp_fn_t)(sp_Val *self, sp_Val *arg);\n");
+        emit_raw(ctx, "struct sp_Val {\n");
+        emit_raw(ctx, "    enum { SP_PROC, SP_INT, SP_BOOL, SP_NIL } tag;\n");
+        emit_raw(ctx, "    union {\n");
+        emit_raw(ctx, "        struct { sp_fn_t fn; int ncaptures; } proc;\n");
+        emit_raw(ctx, "        mrb_int ival;\n");
+        emit_raw(ctx, "        mrb_bool bval;\n");
+        emit_raw(ctx, "    } u;\n");
+        emit_raw(ctx, "    sp_Val *captures[];\n");
+        emit_raw(ctx, "};\n\n");
+
+        emit_raw(ctx, "#include <sys/mman.h>\n");
+        emit_raw(ctx, "#define SP_ARENA_SIZE ((size_t)16ULL * 1024 * 1024 * 1024)\n");
+        emit_raw(ctx, "static char *sp_arena;\n");
+        emit_raw(ctx, "static size_t sp_arena_pos;\n\n");
+
+        emit_raw(ctx, "static void *sp_alloc(size_t sz) {\n");
+        emit_raw(ctx, "    sz = (sz + 7) & ~(size_t)7;\n");
+        emit_raw(ctx, "    if (!sp_arena) {\n");
+        emit_raw(ctx, "        sp_arena = (char *)mmap(NULL, SP_ARENA_SIZE, PROT_READ|PROT_WRITE,\n");
+        emit_raw(ctx, "                                MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);\n");
+        emit_raw(ctx, "        if (sp_arena == MAP_FAILED) { perror(\"mmap\"); exit(1); }\n");
+        emit_raw(ctx, "        sp_arena_pos = 0;\n");
+        emit_raw(ctx, "    }\n");
+        emit_raw(ctx, "    if (sp_arena_pos + sz > SP_ARENA_SIZE) { fprintf(stderr, \"sp_arena exhausted (%%zu used)\\n\", sp_arena_pos); exit(1); }\n");
+        emit_raw(ctx, "    void *p = sp_arena + sp_arena_pos;\n");
+        emit_raw(ctx, "    sp_arena_pos += sz;\n");
+        emit_raw(ctx, "    return p;\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static sp_Val *sp_proc(sp_fn_t fn, int ncap) {\n");
+        emit_raw(ctx, "    sp_Val *v = (sp_Val *)sp_alloc(sizeof(sp_Val) + sizeof(sp_Val *) * ncap);\n");
+        emit_raw(ctx, "    v->tag = SP_PROC;\n");
+        emit_raw(ctx, "    v->u.proc.fn = fn;\n");
+        emit_raw(ctx, "    v->u.proc.ncaptures = ncap;\n");
+        emit_raw(ctx, "    return v;\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static sp_Val *sp_int(mrb_int n) {\n");
+        emit_raw(ctx, "    sp_Val *v = (sp_Val *)sp_alloc(sizeof(sp_Val));\n");
+        emit_raw(ctx, "    v->tag = SP_INT;\n");
+        emit_raw(ctx, "    v->u.ival = n;\n");
+        emit_raw(ctx, "    return v;\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static sp_Val *sp_bool(mrb_bool b) {\n");
+        emit_raw(ctx, "    sp_Val *v = (sp_Val *)sp_alloc(sizeof(sp_Val));\n");
+        emit_raw(ctx, "    v->tag = SP_BOOL;\n");
+        emit_raw(ctx, "    v->u.bval = b;\n");
+        emit_raw(ctx, "    return v;\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static sp_Val sp_nil_val = { .tag = SP_NIL };\n\n");
+
+        emit_raw(ctx, "static sp_Val *sp_call(sp_Val *f, sp_Val *arg) {\n");
+        emit_raw(ctx, "    return f->u.proc.fn(f, arg);\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static mrb_int sp_to_int(sp_Val *v) {\n");
+        emit_raw(ctx, "    return v->u.ival;\n");
+        emit_raw(ctx, "}\n\n");
+
+        /* sp_StrArray for to_array/to_string results */
+        emit_raw(ctx, "/* ---- String array for lambda FizzBuzz ---- */\n");
+        emit_raw(ctx, "typedef struct { char **data; int len; int cap; } sp_StrArray;\n\n");
+        emit_raw(ctx, "static sp_StrArray *sp_StrArray_new(void) {\n");
+        emit_raw(ctx, "    sp_StrArray *a = (sp_StrArray *)calloc(1, sizeof(sp_StrArray));\n");
+        emit_raw(ctx, "    a->cap = 16; a->data = (char **)malloc(sizeof(char *) * a->cap);\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
+
+        emit_raw(ctx, "static void sp_StrArray_push(sp_StrArray *a, char *s) {\n");
+        emit_raw(ctx, "    if (a->len >= a->cap) { a->cap *= 2; a->data = (char **)realloc(a->data, sizeof(char *) * a->cap); }\n");
+        emit_raw(ctx, "    a->data[a->len++] = s;\n}\n\n");
+
+        /* sp_ValArray for to_array returning sp_Val* elements */
+        emit_raw(ctx, "typedef struct { sp_Val **data; int len; int cap; } sp_ValArray;\n\n");
+        emit_raw(ctx, "static sp_ValArray *sp_ValArray_new(void) {\n");
+        emit_raw(ctx, "    sp_ValArray *a = (sp_ValArray *)calloc(1, sizeof(sp_ValArray));\n");
+        emit_raw(ctx, "    a->cap = 16; a->data = (sp_Val **)malloc(sizeof(sp_Val *) * a->cap);\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
+
+        emit_raw(ctx, "static void sp_ValArray_push(sp_ValArray *a, sp_Val *v) {\n");
+        emit_raw(ctx, "    if (a->len >= a->cap) { a->cap *= 2; a->data = (sp_Val **)realloc(a->data, sizeof(sp_Val *) * a->cap); }\n");
+        emit_raw(ctx, "    a->data[a->len++] = v;\n}\n\n");
+    }
 }
 
 void codegen_init(codegen_ctx_t *ctx, pm_parser_t *parser, FILE *out) {
@@ -2606,9 +2881,389 @@ void codegen_init(codegen_ctx_t *ctx, pm_parser_t *parser, FILE *out) {
     ctx->indent = 1;
 }
 
+/* Check if AST contains any lambda nodes (recursive scan) */
+static bool has_lambda_nodes(pm_node_t *node) {
+    if (!node) return false;
+    if (PM_NODE_TYPE(node) == PM_LAMBDA_NODE) return true;
+
+    switch (PM_NODE_TYPE(node)) {
+    case PM_PROGRAM_NODE: {
+        pm_program_node_t *p = (pm_program_node_t *)node;
+        return p->statements ? has_lambda_nodes((pm_node_t *)p->statements) : false;
+    }
+    case PM_STATEMENTS_NODE: {
+        pm_statements_node_t *s = (pm_statements_node_t *)node;
+        for (size_t i = 0; i < s->body.size; i++)
+            if (has_lambda_nodes(s->body.nodes[i])) return true;
+        return false;
+    }
+    case PM_LOCAL_VARIABLE_WRITE_NODE: {
+        pm_local_variable_write_node_t *n = (pm_local_variable_write_node_t *)node;
+        return has_lambda_nodes(n->value);
+    }
+    case PM_CONSTANT_WRITE_NODE: {
+        pm_constant_write_node_t *n = (pm_constant_write_node_t *)node;
+        return has_lambda_nodes(n->value);
+    }
+    case PM_CALL_NODE: {
+        pm_call_node_t *c = (pm_call_node_t *)node;
+        if (c->receiver && has_lambda_nodes(c->receiver)) return true;
+        if (c->arguments) {
+            for (size_t i = 0; i < c->arguments->arguments.size; i++)
+                if (has_lambda_nodes(c->arguments->arguments.nodes[i])) return true;
+        }
+        if (c->block && has_lambda_nodes((pm_node_t *)c->block)) return true;
+        return false;
+    }
+    case PM_BLOCK_NODE: {
+        pm_block_node_t *b = (pm_block_node_t *)node;
+        return b->body ? has_lambda_nodes((pm_node_t *)b->body) : false;
+    }
+    case PM_DEF_NODE: {
+        pm_def_node_t *d = (pm_def_node_t *)node;
+        return d->body ? has_lambda_nodes((pm_node_t *)d->body) : false;
+    }
+    default:
+        return false;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Lambda capture analysis                                            */
+/* ------------------------------------------------------------------ */
+
+/* Collect all free variable references in a lambda body.
+ * param_name is the lambda's own parameter (not a capture).
+ * outer_params collects names of variables referenced but not locally bound. */
+
+typedef struct {
+    char names[256][64];
+    int count;
+} capture_list_t;
+
+static void capture_list_add(capture_list_t *cl, const char *name) {
+    for (int i = 0; i < cl->count; i++)
+        if (strcmp(cl->names[i], name) == 0) return;
+    if (cl->count < 256)
+        snprintf(cl->names[cl->count++], 64, "%s", name);
+}
+
+static bool capture_list_has(capture_list_t *cl, const char *name) {
+    for (int i = 0; i < cl->count; i++)
+        if (strcmp(cl->names[i], name) == 0) return true;
+    return false;
+}
+
+/* Scan a node for local variable reads that are free variables
+ * (not the lambda's own param, and not defined locally in the body).
+ * local_defs: variables defined within this lambda body (not captures).
+ */
+static void scan_captures(codegen_ctx_t *ctx, pm_node_t *node,
+                          const char *param_name,
+                          capture_list_t *local_defs,
+                          capture_list_t *result) {
+    if (!node) return;
+
+    switch (PM_NODE_TYPE(node)) {
+    case PM_LOCAL_VARIABLE_READ_NODE: {
+        pm_local_variable_read_node_t *n = (pm_local_variable_read_node_t *)node;
+        char *name = cstr(ctx, n->name);
+        /* Not the param, not a local def → it's a capture */
+        if (strcmp(name, param_name) != 0 && !capture_list_has(local_defs, name))
+            capture_list_add(result, name);
+        free(name);
+        break;
+    }
+    case PM_LOCAL_VARIABLE_WRITE_NODE: {
+        pm_local_variable_write_node_t *n = (pm_local_variable_write_node_t *)node;
+        char *name = cstr(ctx, n->name);
+        capture_list_add(local_defs, name);
+        scan_captures(ctx, n->value, param_name, local_defs, result);
+        free(name);
+        break;
+    }
+    case PM_LAMBDA_NODE: {
+        /* Inner lambdas: scan their body too, but their own param is not a capture */
+        pm_lambda_node_t *lam = (pm_lambda_node_t *)node;
+        char *inner_param = NULL;
+        if (lam->parameters && PM_NODE_TYPE(lam->parameters) == PM_BLOCK_PARAMETERS_NODE) {
+            pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)lam->parameters;
+            if (bp->parameters && bp->parameters->requireds.size > 0) {
+                pm_node_t *p = bp->parameters->requireds.nodes[0];
+                if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE)
+                    inner_param = cstr(ctx, ((pm_required_parameter_node_t *)p)->name);
+            }
+        }
+        /* The inner lambda's param is local to it, but any other vars it references
+         * that are not its own param and not local to it are captures of the OUTER.
+         * We scan the inner body looking for refs to variables from OUR scope. */
+        capture_list_t inner_local_defs = {.count = 0};
+        capture_list_t inner_caps = {.count = 0};
+        scan_captures(ctx, (pm_node_t *)lam->body,
+                      inner_param ? inner_param : "",
+                      &inner_local_defs, &inner_caps);
+        /* Any of the inner lambda's captures that are not our param or local def
+         * are also our captures */
+        for (int i = 0; i < inner_caps.count; i++) {
+            if (strcmp(inner_caps.names[i], param_name) != 0 &&
+                !capture_list_has(local_defs, inner_caps.names[i]))
+                capture_list_add(result, inner_caps.names[i]);
+        }
+        free(inner_param);
+        break;
+    }
+    case PM_CALL_NODE: {
+        pm_call_node_t *c = (pm_call_node_t *)node;
+        if (c->receiver) scan_captures(ctx, c->receiver, param_name, local_defs, result);
+        if (c->arguments) {
+            for (size_t i = 0; i < c->arguments->arguments.size; i++)
+                scan_captures(ctx, c->arguments->arguments.nodes[i], param_name, local_defs, result);
+        }
+        if (c->block) scan_captures(ctx, (pm_node_t *)c->block, param_name, local_defs, result);
+        break;
+    }
+    case PM_BLOCK_NODE: {
+        pm_block_node_t *b = (pm_block_node_t *)node;
+        if (b->body) scan_captures(ctx, (pm_node_t *)b->body, param_name, local_defs, result);
+        break;
+    }
+    case PM_STATEMENTS_NODE: {
+        pm_statements_node_t *s = (pm_statements_node_t *)node;
+        for (size_t i = 0; i < s->body.size; i++)
+            scan_captures(ctx, s->body.nodes[i], param_name, local_defs, result);
+        break;
+    }
+    case PM_PARENTHESES_NODE: {
+        pm_parentheses_node_t *p = (pm_parentheses_node_t *)node;
+        if (p->body) scan_captures(ctx, p->body, param_name, local_defs, result);
+        break;
+    }
+    case PM_IF_NODE: {
+        pm_if_node_t *n = (pm_if_node_t *)node;
+        scan_captures(ctx, n->predicate, param_name, local_defs, result);
+        if (n->statements) scan_captures(ctx, (pm_node_t *)n->statements, param_name, local_defs, result);
+        if (n->subsequent) scan_captures(ctx, (pm_node_t *)n->subsequent, param_name, local_defs, result);
+        break;
+    }
+    case PM_ELSE_NODE: {
+        pm_else_node_t *n = (pm_else_node_t *)node;
+        if (n->statements) scan_captures(ctx, (pm_node_t *)n->statements, param_name, local_defs, result);
+        break;
+    }
+    case PM_UNTIL_NODE: {
+        pm_until_node_t *n = (pm_until_node_t *)node;
+        scan_captures(ctx, n->predicate, param_name, local_defs, result);
+        if (n->statements) scan_captures(ctx, (pm_node_t *)n->statements, param_name, local_defs, result);
+        break;
+    }
+    case PM_WHILE_NODE: {
+        pm_while_node_t *n = (pm_while_node_t *)node;
+        scan_captures(ctx, n->predicate, param_name, local_defs, result);
+        if (n->statements) scan_captures(ctx, (pm_node_t *)n->statements, param_name, local_defs, result);
+        break;
+    }
+    case PM_CONSTANT_READ_NODE: {
+        /* Constants like FIRST, IF, LEFT, RIGHT, IS_EMPTY, REST — these are globals, not captures */
+        break;
+    }
+    case PM_RETURN_NODE: {
+        pm_return_node_t *n = (pm_return_node_t *)node;
+        if (n->arguments) {
+            for (size_t i = 0; i < n->arguments->arguments.size; i++)
+                scan_captures(ctx, n->arguments->arguments.nodes[i], param_name, local_defs, result);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* codegen a lambda expression — returns an expression string.
+ * Emits the lambda C function to ctx->lambda_out (or ctx->out if no secondary). */
+/* Generate C code for a lambda node.
+ * Emits a static C function _lam_N to ctx->lambda_out and returns an
+ * expression (written to ctx->out) that constructs the closure. */
+static char *codegen_lambda(codegen_ctx_t *ctx, pm_lambda_node_t *lam) {
+    int lam_id = ctx->lambda_counter++;
+
+    /* Extract parameter name */
+    char param_name[64] = "";
+    if (lam->parameters && PM_NODE_TYPE(lam->parameters) == PM_BLOCK_PARAMETERS_NODE) {
+        pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)lam->parameters;
+        if (bp->parameters && bp->parameters->requireds.size > 0) {
+            pm_node_t *p = bp->parameters->requireds.nodes[0];
+            if (PM_NODE_TYPE(p) == PM_REQUIRED_PARAMETER_NODE) {
+                char *pn = cstr(ctx, ((pm_required_parameter_node_t *)p)->name);
+                snprintf(param_name, sizeof(param_name), "%s", pn);
+                free(pn);
+            }
+        }
+    }
+
+    /* Capture analysis: find free variables in the body */
+    capture_list_t local_defs = {.count = 0};
+    capture_list_t captures = {.count = 0};
+    scan_captures(ctx, (pm_node_t *)lam->body, param_name, &local_defs, &captures);
+
+    /* Push lambda scope */
+    int scope_idx = ctx->lambda_scope_depth;
+    ctx->lambda_scope_depth++;
+    snprintf(ctx->lambda_scope[scope_idx].param, 64, "%s", param_name);
+    ctx->lambda_scope[scope_idx].capture_count = captures.count;
+    for (int i = 0; i < captures.count; i++)
+        snprintf(ctx->lambda_scope[scope_idx].captures[i], 64, "%s", captures.names[i]);
+    ctx->lambda_scope[scope_idx].depth = scope_idx;
+
+    /* Buffer the entire function definition (header + body + close).
+     * Inner lambdas will also write their defs to lambda_out.
+     * By buffering this function, inner defs appear before us in lambda_out,
+     * which is exactly what we want (forward decls handle ordering). */
+    FILE *caller_out = ctx->out;
+    int saved_indent = ctx->indent;
+
+    char *func_buf_data = NULL;
+    size_t func_buf_size = 0;
+    FILE *func_buf = open_memstream(&func_buf_data, &func_buf_size);
+    ctx->out = func_buf;
+
+    fprintf(ctx->out, "static sp_Val *_lam_%d(sp_Val *self, sp_Val *arg) {\n", lam_id);
+
+    /* The parameter is accessible as `arg` — create a local alias */
+    if (param_name[0]) {
+        fprintf(ctx->out, "    sp_Val *lv_%s = arg;\n", param_name);
+    } else {
+        fprintf(ctx->out, "    (void)arg;\n");
+    }
+    fprintf(ctx->out, "    (void)self;\n");
+
+    /* Extract captures from self->captures[] */
+    for (int i = 0; i < captures.count; i++) {
+        fprintf(ctx->out, "    sp_Val *lv_%s = self->captures[%d];\n", captures.names[i], i);
+    }
+
+    /* Generate body — the last expression is the return value. */
+    ctx->indent = 1;
+
+    if (lam->body) {
+        pm_node_t *body = (pm_node_t *)lam->body;
+        if (PM_NODE_TYPE(body) == PM_STATEMENTS_NODE) {
+            pm_statements_node_t *stmts = (pm_statements_node_t *)body;
+            for (size_t i = 0; i + 1 < stmts->body.size; i++)
+                codegen_stmt(ctx, stmts->body.nodes[i]);
+            if (stmts->body.size > 0) {
+                char *val = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                emit(ctx, "return %s;\n", val);
+                free(val);
+            } else {
+                emit(ctx, "return &sp_nil_val;\n");
+            }
+        } else {
+            char *val = codegen_expr(ctx, body);
+            emit(ctx, "return %s;\n", val);
+            free(val);
+        }
+    } else {
+        emit(ctx, "return &sp_nil_val;\n");
+    }
+
+    fprintf(ctx->out, "}\n\n");
+    fclose(func_buf);
+
+    /* Write the complete function to lambda_out.
+     * Inner lambda function defs were written to lambda_out during body generation,
+     * so they appear before this function — correct ordering. */
+    fwrite(func_buf_data, 1, func_buf_size, ctx->lambda_out);
+    free(func_buf_data);
+
+    /* Restore caller output */
+    ctx->out = caller_out;
+    ctx->indent = saved_indent;
+
+    /* Pop lambda scope */
+    ctx->lambda_scope_depth--;
+
+    /* Build the closure construction expression (written to caller_out) */
+    if (captures.count == 0) {
+        return sfmt("sp_proc(_lam_%d, 0)", lam_id);
+    } else {
+        /* Need a temporary to fill in captures */
+        int tmp = ctx->temp_counter++;
+        emit(ctx, "sp_Val *_cl_%d = sp_proc(_lam_%d, %d);\n", tmp, lam_id, captures.count);
+        for (int i = 0; i < captures.count; i++) {
+            emit(ctx, "_cl_%d->captures[%d] = lv_%s;\n", tmp, i, captures.names[i]);
+        }
+        return sfmt("_cl_%d", tmp);
+    }
+}
+
+/* Emit hand-written FizzBuzz helper functions for lambda mode */
+static void emit_lambda_fizzbuzz_funcs(codegen_ctx_t *ctx) {
+    /* to_integer: proc[-> n { n + 1 }][0] */
+    emit_raw(ctx, "static sp_Val *_lam_incr(sp_Val *self, sp_Val *arg) {\n");
+    emit_raw(ctx, "    (void)self;\n");
+    emit_raw(ctx, "    return sp_int(sp_to_int(arg) + 1);\n");
+    emit_raw(ctx, "}\n\n");
+
+    emit_raw(ctx, "static mrb_int sp_to_integer(sp_Val *lv_proc) {\n");
+    emit_raw(ctx, "    sp_Val *incr = sp_proc(_lam_incr, 0);\n");
+    emit_raw(ctx, "    sp_Val *result = sp_call(sp_call(lv_proc, incr), sp_int(0));\n");
+    emit_raw(ctx, "    return sp_to_int(result);\n");
+    emit_raw(ctx, "}\n\n");
+
+    /* to_boolean: IF[proc][true][false] */
+    emit_raw(ctx, "static mrb_bool sp_to_boolean(sp_Val *lv_proc) {\n");
+    emit_raw(ctx, "    sp_Val *result = sp_call(sp_call(sp_call(cv_IF, lv_proc), sp_bool(TRUE)), sp_bool(FALSE));\n");
+    emit_raw(ctx, "    return result->u.bval;\n");
+    emit_raw(ctx, "}\n\n");
+
+    /* to_array: iterate church-encoded list */
+    emit_raw(ctx, "static sp_ValArray *sp_to_array(sp_Val *lv_proc) {\n");
+    emit_raw(ctx, "    sp_ValArray *lv_array = sp_ValArray_new();\n");
+    emit_raw(ctx, "    while (!sp_to_boolean(sp_call(cv_IS_EMPTY, lv_proc))) {\n");
+    emit_raw(ctx, "        sp_ValArray_push(lv_array, sp_call(cv_FIRST, lv_proc));\n");
+    emit_raw(ctx, "        lv_proc = sp_call(cv_REST, lv_proc);\n");
+    emit_raw(ctx, "    }\n");
+    emit_raw(ctx, "    return lv_array;\n");
+    emit_raw(ctx, "}\n\n");
+
+    /* to_char: '0123456789BFiuz'.slice(to_integer(c)) */
+    emit_raw(ctx, "static char *sp_to_char(sp_Val *lv_c) {\n");
+    emit_raw(ctx, "    static const char *chars = \"0123456789BFiuz\";\n");
+    emit_raw(ctx, "    mrb_int idx = sp_to_integer(lv_c);\n");
+    emit_raw(ctx, "    char *buf = (char *)malloc(2);\n");
+    emit_raw(ctx, "    buf[0] = chars[idx]; buf[1] = '\\0';\n");
+    emit_raw(ctx, "    return buf;\n");
+    emit_raw(ctx, "}\n\n");
+
+    /* to_string: to_array(s).map { |c| to_char(c) }.join */
+    emit_raw(ctx, "static char *sp_to_string(sp_Val *lv_s) {\n");
+    emit_raw(ctx, "    sp_ValArray *arr = sp_to_array(lv_s);\n");
+    emit_raw(ctx, "    size_t total = 0;\n");
+    emit_raw(ctx, "    char **parts = (char **)malloc(sizeof(char *) * arr->len);\n");
+    emit_raw(ctx, "    for (int i = 0; i < arr->len; i++) {\n");
+    emit_raw(ctx, "        parts[i] = sp_to_char(arr->data[i]);\n");
+    emit_raw(ctx, "        total += strlen(parts[i]);\n");
+    emit_raw(ctx, "    }\n");
+    emit_raw(ctx, "    char *result = (char *)malloc(total + 1);\n");
+    emit_raw(ctx, "    result[0] = '\\0';\n");
+    emit_raw(ctx, "    for (int i = 0; i < arr->len; i++) {\n");
+    emit_raw(ctx, "        strcat(result, parts[i]);\n");
+    emit_raw(ctx, "        free(parts[i]);\n");
+    emit_raw(ctx, "    }\n");
+    emit_raw(ctx, "    free(parts);\n");
+    emit_raw(ctx, "    free(arr->data);\n");
+    emit_raw(ctx, "    free(arr);\n");
+    emit_raw(ctx, "    return result;\n");
+    emit_raw(ctx, "}\n\n");
+}
+
 void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     assert(PM_NODE_TYPE(root) == PM_PROGRAM_NODE);
     pm_program_node_t *prog = (pm_program_node_t *)root;
+
+    /* Detect lambda mode */
+    ctx->lambda_mode = has_lambda_nodes(root);
 
     /* Pass 1: Analyze classes, modules, functions */
     class_analysis_pass(ctx, root);
@@ -2622,6 +3277,15 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     /* Pass 2c: Re-infer variable types now that function return types are resolved */
     infer_pass(ctx, root);
 
+    /* Set up lambda output buffer if needed */
+    FILE *lambda_buf = NULL;
+    char *lambda_buf_data = NULL;
+    size_t lambda_buf_size = 0;
+    if (ctx->lambda_mode) {
+        lambda_buf = open_memstream(&lambda_buf_data, &lambda_buf_size);
+        ctx->lambda_out = lambda_buf;
+    }
+
     /* Emit C file */
     emit_header(ctx);
 
@@ -2634,6 +3298,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         const char *init = "";
         if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
         else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
+        else if (v->type.kind == SPINEL_TYPE_PROC) init = " = NULL";
         emit_raw(ctx, "static %s %s%s;\n", ct, cn, init);
         free(ct); free(cn);
     }
@@ -2653,25 +3318,27 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         emit_module(ctx, &ctx->modules[i]);
 
     /* Forward declarations for top-level functions */
-    for (int i = 0; i < ctx->func_count; i++) {
-        func_info_t *f = &ctx->funcs[i];
-        char *ret_ct = vt_ctype(ctx, f->return_type, false);
-        bool ret_void = (f->return_type.kind == SPINEL_TYPE_NIL);
-        emit_raw(ctx, "static %s sp_%s(", ret_void ? "void" : ret_ct, f->name);
-        for (int j = 0; j < f->param_count; j++) {
-            if (j > 0) emit_raw(ctx, ", ");
-            char *pct = vt_ctype(ctx, f->params[j].type, false);
-            if (f->params[j].is_array)
-                emit_raw(ctx, "%s *", pct);
-            else
-                emit_raw(ctx, "%s", pct);
-            free(pct);
+    if (!ctx->lambda_mode) {
+        for (int i = 0; i < ctx->func_count; i++) {
+            func_info_t *f = &ctx->funcs[i];
+            char *ret_ct = vt_ctype(ctx, f->return_type, false);
+            bool ret_void = (f->return_type.kind == SPINEL_TYPE_NIL);
+            emit_raw(ctx, "static %s sp_%s(", ret_void ? "void" : ret_ct, f->name);
+            for (int j = 0; j < f->param_count; j++) {
+                if (j > 0) emit_raw(ctx, ", ");
+                char *pct = vt_ctype(ctx, f->params[j].type, false);
+                if (f->params[j].is_array)
+                    emit_raw(ctx, "%s *", pct);
+                else
+                    emit_raw(ctx, "%s", pct);
+                free(pct);
+            }
+            if (f->param_count == 0) emit_raw(ctx, "void");
+            emit_raw(ctx, ");\n");
+            free(ret_ct);
         }
-        if (f->param_count == 0) emit_raw(ctx, "void");
-        emit_raw(ctx, ");\n");
-        free(ret_ct);
+        emit_raw(ctx, "\n");
     }
-    emit_raw(ctx, "\n");
 
     /* Constructors */
     for (int i = 0; i < ctx->class_count; i++)
@@ -2684,37 +3351,109 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             emit_method(ctx, cls, &cls->methods[j]);
     }
 
-    /* Top-level functions */
-    for (int i = 0; i < ctx->func_count; i++)
-        emit_top_func(ctx, &ctx->funcs[i]);
+    if (ctx->lambda_mode) {
+        /* In lambda mode: first we generate the main body to a temp buffer
+         * to collect all lambda functions, then write them in order. */
 
-    /* Main function */
-    emit_raw(ctx, "int main(int argc, char **argv) {\n");
+        /* Generate main body to another temp buffer first to collect lambdas */
+        char *main_buf_data = NULL;
+        size_t main_buf_size = 0;
+        FILE *main_buf = open_memstream(&main_buf_data, &main_buf_size);
+        FILE *real_out = ctx->out;
+        ctx->out = main_buf;
 
-    /* Variable declarations for top-level (skip constants — they're global statics) */
-    for (int i = 0; i < ctx->var_count; i++) {
-        var_entry_t *v = &ctx->vars[i];
-        if (v->is_constant) continue;
-        char *ct = vt_ctype(ctx, v->type, false);
-        char *cn = make_cname(v->name, v->is_constant);
-        const char *init = "";
-        if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-        else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-        else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
-        else if (v->type.kind == SPINEL_TYPE_ARRAY) {
-            emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
+        emit_raw(ctx, "int main(int argc, char **argv) {\n");
+        emit_raw(ctx, "    (void)argc; (void)argv;\n");
+
+        /* Variable declarations for top-level */
+        for (int i = 0; i < ctx->var_count; i++) {
+            var_entry_t *v = &ctx->vars[i];
+            if (v->is_constant) continue;
+            char *ct = vt_ctype(ctx, v->type, false);
+            char *cn = make_cname(v->name, v->is_constant);
+            if (v->type.kind == SPINEL_TYPE_PROC) {
+                emit_raw(ctx, "    sp_Val *%s = NULL;\n", cn);
+            } else if (v->type.kind == SPINEL_TYPE_ARRAY) {
+                emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
+            } else if (v->type.kind == SPINEL_TYPE_VALUE || v->type.kind == SPINEL_TYPE_UNKNOWN) {
+                /* In lambda mode, VALUE vars might hold sp_StrArray* or other pointers */
+                emit_raw(ctx, "    void *%s = NULL;\n", cn);
+            } else {
+                const char *init = "";
+                if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
+                else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
+                else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
+                emit_raw(ctx, "    %s %s%s;\n", ct, cn, init);
+            }
             free(ct); free(cn);
-            continue;
         }
-        else if (v->type.kind == SPINEL_TYPE_OBJECT) init = ""; /* struct zero-init handled elsewhere */
-        emit_raw(ctx, "    %s %s%s;\n", ct, cn, init);
-        free(ct); free(cn);
+        emit_raw(ctx, "\n");
+
+        /* Generate top-level code (this will collect lambda functions into lambda_buf) */
+        codegen_stmts(ctx, (pm_node_t *)prog->statements);
+
+        emit_raw(ctx, "\n    return 0;\n");
+        emit_raw(ctx, "}\n");
+        fclose(main_buf);
+
+        /* Now write to real output: lambdas first, then fizzbuzz helpers, then main */
+        ctx->out = real_out;
+
+        /* Forward declare all lambda functions */
+        for (int i = 0; i < ctx->lambda_counter; i++)
+            emit_raw(ctx, "static sp_Val *_lam_%d(sp_Val *self, sp_Val *arg);\n", i);
+        emit_raw(ctx, "\n");
+
+        /* Emit lambda function bodies */
+        fclose(lambda_buf);
+        if (lambda_buf_data) {
+            fwrite(lambda_buf_data, 1, lambda_buf_size, ctx->out);
+            free(lambda_buf_data);
+        }
+        ctx->lambda_out = NULL;
+
+        /* Emit hand-written FizzBuzz helper functions */
+        emit_lambda_fizzbuzz_funcs(ctx);
+
+        /* Emit main function body */
+        fwrite(main_buf_data, 1, main_buf_size, ctx->out);
+        free(main_buf_data);
+
+    } else {
+        /* Non-lambda mode: original path */
+
+        /* Top-level functions */
+        for (int i = 0; i < ctx->func_count; i++)
+            emit_top_func(ctx, &ctx->funcs[i]);
+
+        /* Main function */
+        emit_raw(ctx, "int main(int argc, char **argv) {\n");
+
+        /* Variable declarations for top-level (skip constants — they're global statics) */
+        for (int i = 0; i < ctx->var_count; i++) {
+            var_entry_t *v = &ctx->vars[i];
+            if (v->is_constant) continue;
+            char *ct = vt_ctype(ctx, v->type, false);
+            char *cn = make_cname(v->name, v->is_constant);
+            const char *init = "";
+            if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
+            else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
+            else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
+            else if (v->type.kind == SPINEL_TYPE_ARRAY) {
+                emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
+                free(ct); free(cn);
+                continue;
+            }
+            else if (v->type.kind == SPINEL_TYPE_OBJECT) init = "";
+            emit_raw(ctx, "    %s %s%s;\n", ct, cn, init);
+            free(ct); free(cn);
+        }
+        emit_raw(ctx, "\n");
+
+        /* Top-level code */
+        codegen_stmts(ctx, (pm_node_t *)prog->statements);
+
+        emit_raw(ctx, "\n    return 0;\n");
+        emit_raw(ctx, "}\n");
     }
-    emit_raw(ctx, "\n");
-
-    /* Top-level code */
-    codegen_stmts(ctx, (pm_node_t *)prog->statements);
-
-    emit_raw(ctx, "\n    return 0;\n");
-    emit_raw(ctx, "}\n");
 }

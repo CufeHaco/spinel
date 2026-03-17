@@ -23,6 +23,7 @@ typedef enum {
     SPINEL_TYPE_NIL,
     SPINEL_TYPE_OBJECT,  /* user-defined class instance */
     SPINEL_TYPE_ARRAY,   /* sp_IntArray * (built-in integer array) */
+    SPINEL_TYPE_PROC,    /* sp_Val * (lambda/closure) */
     SPINEL_TYPE_VALUE,   /* boxed mrb_value (fallback) */
 } spinel_type_t;
 
@@ -141,6 +142,22 @@ typedef struct {
 
     /* When true, the last expression in a block should be emitted as a return */
     bool implicit_return;
+
+    /* Lambda/closure codegen state */
+    int lambda_counter;            /* unique ID for each lambda function */
+    bool lambda_mode;              /* true when fizzbuzz-style lambda code detected */
+    FILE *lambda_out;              /* secondary output for lambda function bodies */
+
+    /* Lambda scope stack for capture analysis */
+    #define MAX_LAMBDA_DEPTH 64
+    #define MAX_SCOPE_VARS 32
+    struct {
+        char param[64];            /* parameter name for this lambda */
+        char captures[MAX_SCOPE_VARS][64]; /* captured variable names */
+        int capture_count;
+        int depth;
+    } lambda_scope[MAX_LAMBDA_DEPTH];
+    int lambda_scope_depth;
 } codegen_ctx_t;
 
 void codegen_init(codegen_ctx_t *ctx, pm_parser_t *parser, FILE *out);
