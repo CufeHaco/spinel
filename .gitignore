@@ -16,3 +16,6 @@
 
 # Dependencies (fetched by `make deps`)
 /lib/prism/
+
+# Claude Code local settings
+.claude/
