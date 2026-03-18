@@ -119,6 +119,13 @@ For `bm_ao_render.rb`, the compiler:
 | Numeric methods | `abs`, `even?`, `odd?`, `zero?`, `ceil`, `floor`, `round` |
 | **I/O** | |
 | `puts`/`print`/`printf`/`putc`/`p` | Int, Float, Bool, String |
+| **Regexp** | |
+| Regex literals, `=~`, captures | `/\d+/`, `$1`, `$2`, `$3` |
+| `match?`, `gsub`, `sub`, `scan`, `split` | via oniguruma |
+| **Introspection** | |
+| `is_a?`, `respond_to?`, `nil?` | compile-time resolved |
+| **Data Structures** | |
+| `Struct.new(:x, :y)` | synthetic class with getters/setters |
 | **Runtime** | |
 | Mark-and-sweep GC | shadow stack roots, finalizers |
 | Arena allocator | for closure-heavy programs |
@@ -141,8 +148,8 @@ spinel/
 ├── src/
 │   ├── main.c          # CLI, file reading, Prism parsing
 │   ├── codegen.h       # Type system, class/method/module info structs
-│   └── codegen.c       # Multi-pass code generator (~6600 lines)
-├── examples/           # 17 test programs
+│   └── codegen.c       # Multi-pass code generator (~7200 lines)
+├── examples/           # 21 test programs
 │   ├── bm_so_mandelbrot.rb   # Mandelbrot (while, bitwise, PBM)
 │   ├── bm_ao_render.rb       # AO raytracer (6 classes, modules, GC)
 │   ├── bm_so_lists.rb        # Array operations (push/pop/shift, GC)
@@ -159,7 +166,11 @@ spinel/
 │   ├── bm_numeric.rb         # Numeric methods, power
 │   ├── bm_attr.rb            # attr_accessor, for..in, loop, class methods
 │   ├── bm_kwargs.rb          # Keyword args, rest/splat
-│   └── bm_mixin.rb           # include (mixin)
+│   ├── bm_mixin.rb           # include (mixin)
+│   ├── bm_misc.rb            # upto/downto, String <<
+│   ├── bm_regexp.rb          # Regexp (oniguruma)
+│   ├── bm_introspect.rb      # is_a?, respond_to?, nil?
+│   └── bm_struct.rb          # Struct.new
 ├── prototype/
 │   └── tools/          # Step 0 prototype (RBS extraction, LumiTrace)
 ├── Makefile
