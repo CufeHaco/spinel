@@ -79,53 +79,49 @@ For `bm_ao_render.rb`, the compiler:
 | Classes with instance variables | `class Vec; def initialize(x,y,z); @x=x; end; end` |
 | Inheritance | `class Dog < Animal` |
 | `super` | `super(name)` in child initialize/methods |
-| Method definitions | `def vadd(b); Vec.new(@x+b.x, ...); end` |
-| Getters/setters (inlined) | `def x; @x; end` / `def x=(v); @x=v; end` |
+| `include` (mixin) | `class Widget; include Printable; end` |
+| `attr_accessor/reader/writer` | `attr_accessor :x, :y` |
+| Class methods | `def self.origin; Point.new(0,0); end` |
+| Getters/setters (inlined) | auto-generated from attr or manual |
 | Object construction | `Vec.new(1.0, 2.0, 3.0)` |
-| Method calls on typed objects | `ray.org.vsub(@center)` |
 | Modules with state | `module Rand; @x = 123; def self.rand; ...; end; end` |
 | **Blocks & Closures** | |
 | `yield` | `def my_iter(n); yield i; end` |
 | Blocks at call sites | `my_iter(10) do \|i\| total += i end` |
 | `Array#each/map/select` | `arr.each { \|x\| puts x }` (inlined) |
+| `Hash#each` | `h.each { \|k,v\| puts k }` |
 | `Integer#times` with block | `n.times do \|i\| ... end` |
 | Lambda/closures | `-> x { x + 1 }` with capture analysis |
 | **Control Flow** | |
-| `if` / `elsif` / `else` | conditional branching |
-| `case` / `when` / `else` | pattern matching with values, ranges |
-| `unless` | `unless x > 20` |
-| `while`, `until` | loops |
-| Ternary operator | `escape ? 0 : 1` |
-| `and` / `or` / `not` | boolean operators |
-| `break`, `next`, `return` | loop/method exit, continue |
+| `if`/`elsif`/`else`, `unless` | conditional branching |
+| `case`/`when`/`else` | values, multiple values, ranges |
+| `while`, `until`, `loop do`, `for..in` | loops |
+| Ternary, `and`/`or`/`not` | boolean operators |
+| `break`, `next`, `return` | loop/method exit |
 | **Exception Handling** | |
-| `begin`/`rescue`/`ensure` | exception handling (setjmp/longjmp) |
-| `raise` | `raise "error message"` |
-| `rescue => e` | capture exception message |
-| `retry` | restart begin block |
-| **Types & Literals** | |
-| Integer, Float, Boolean, String, nil | unboxed C types |
-| Symbol | `:hello` → string constant |
+| `begin`/`rescue`/`ensure`/`retry` | setjmp/longjmp based |
+| `raise`, `rescue => e` | string exceptions |
+| **Parameters** | |
+| Positional, default values | `def foo(x, y = 10)` |
+| Keyword arguments | `def greet(name:, greeting: "Hello")` |
+| Rest/splat | `def sum(*nums)` |
+| **Types & Collections** | |
+| Integer, Float, Boolean, String, Symbol, nil | unboxed C types |
 | Integer arrays | push/pop/shift/dup/reverse!/each/map/select |
-| Hash (string→integer) | `h = {}; h["key"] = val; h.each { \|k,v\| }` |
-| Default parameter values | `def greet(name, greeting = "Hello")` |
-| **Arithmetic & Operators** | |
-| Arithmetic, comparison, bitwise | `+`, `-`, `*`, `/`, `%`, `<`, `>`, `==`, `<<`, `\|`, `^`, `**` |
-| Unary minus | `-b`, `-(expr)` |
-| `Math.sqrt`, `Math.cos`, `Math.sin` | C math functions |
-| Integer methods | `abs`, `even?`, `odd?`, `zero?` |
-| Float methods | `abs`, `ceil`, `floor`, `round` |
+| Hash (string→integer) | `[]=`, `[]`, `each`, `has_key?`, `delete` |
 | **Strings** | |
-| String literals, interpolation | `"hello #{name}"` → printf |
-| String methods | `length`, `upcase`, `downcase`, `include?`, `+` |
-| `Integer#to_s`, `Integer#chr` | number to string conversion |
+| Literals, interpolation | `"hello #{name}"` → printf |
+| 15+ methods | length, upcase, downcase, strip, reverse, gsub, sub, split, ... |
+| Comparison, repetition | `==`, `<`, `"ha" * 3` |
+| **Arithmetic** | |
+| All operators | `+` `-` `*` `/` `%` `**` `<<` `\|` `^` `<` `>` `==` |
+| Math module | `sqrt`, `cos`, `sin` |
+| Numeric methods | `abs`, `even?`, `odd?`, `zero?`, `ceil`, `floor`, `round` |
 | **I/O** | |
-| `puts`, `print`, `printf`, `putc`, `p` | stdio calls (Int, Float, Bool, String) |
-| **Other** | |
-| Parallel/chained assignment | `zr, zi = tr, ti` / `a = b = 0` |
-| Local variables, constants | `size = 600`, `ITER = 49` |
-| Array indexing | `basis[0].x`, `@spheres[1].intersect(...)` |
-| Mark-and-sweep GC | automatic for heap-allocated objects |
+| `puts`/`print`/`printf`/`putc`/`p` | Int, Float, Bool, String |
+| **Runtime** | |
+| Mark-and-sweep GC | shadow stack roots, finalizers |
+| Arena allocator | for closure-heavy programs |
 
 ## Benchmarks
 
@@ -145,19 +141,27 @@ spinel/
 ├── src/
 │   ├── main.c          # CLI, file reading, Prism parsing
 │   ├── codegen.h       # Type system, class/method/module info structs
-│   └── codegen.c       # Multi-pass code generator (~5000 lines)
-├── examples/
-│   ├── bm_so_mandelbrot.rb   # Mandelbrot set (while loops, bitwise)
-│   ├── bm_ao_render.rb       # AO raytracer (6 classes, modules)
-│   ├── bm_so_lists.rb        # Array operations (push/pop/shift)
+│   └── codegen.c       # Multi-pass code generator (~6600 lines)
+├── examples/           # 17 test programs
+│   ├── bm_so_mandelbrot.rb   # Mandelbrot (while, bitwise, PBM)
+│   ├── bm_ao_render.rb       # AO raytracer (6 classes, modules, GC)
+│   ├── bm_so_lists.rb        # Array operations (push/pop/shift, GC)
 │   ├── bm_fib.rb             # Recursive fibonacci
-│   ├── bm_app_lc_fizzbuzz.rb # Lambda calculus FizzBuzz (1201 closures)
-│   ├── bm_mandel_term.rb     # Terminal Mandelbrot (cross-function calls)
-│   ├── bm_yield.rb           # yield/blocks (iterators, each/map/select)
-│   ├── bm_case.rb            # case/when, unless, next, default args
-│   └── bm_inherit.rb         # Inheritance, super
+│   ├── bm_app_lc_fizzbuzz.rb # Lambda calculus (1201 closures, arena)
+│   ├── bm_mandel_term.rb     # Terminal Mandelbrot
+│   ├── bm_yield.rb           # yield/blocks, each/map/select
+│   ├── bm_case.rb            # case/when, unless, next, defaults
+│   ├── bm_inherit.rb         # Inheritance, super
+│   ├── bm_rescue.rb          # rescue/raise/ensure/retry
+│   ├── bm_hash.rb            # Hash operations
+│   ├── bm_strings.rb         # Symbol, basic string methods
+│   ├── bm_strings2.rb        # Advanced string methods, split
+│   ├── bm_numeric.rb         # Numeric methods, power
+│   ├── bm_attr.rb            # attr_accessor, for..in, loop, class methods
+│   ├── bm_kwargs.rb          # Keyword args, rest/splat
+│   └── bm_mixin.rb           # include (mixin)
 ├── prototype/
-│   └── tools/          # Step 0 prototype (RBS extraction, LumiTrace, etc.)
+│   └── tools/          # Step 0 prototype (RBS extraction, LumiTrace)
 ├── Makefile
 ├── PLAN.md             # Implementation roadmap
 └── ruby_aot_compiler_design.md  # Detailed design document
