@@ -161,6 +161,10 @@ typedef struct {
     FILE *block_out;               /* secondary output for block function bodies */
     bool in_yield_func;            /* true when inside a function that uses yield */
 
+    /* Exception handling: true when raise/rescue is used */
+    bool needs_exc;
+    int exc_counter;   /* unique ID for retry labels */
+
     /* GC: true when any non-value-type class or sp_IntArray is used */
     bool needs_gc;
     int gc_type_count;  /* number of GC-managed types (for type_id assignment) */

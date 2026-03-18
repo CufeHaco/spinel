@@ -911,6 +911,13 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_ARRAY_NODE:
         return vt_prim(SPINEL_TYPE_ARRAY);
 
+    case PM_BEGIN_NODE: {
+        pm_begin_node_t *bn = (pm_begin_node_t *)node;
+        if (bn->statements)
+            return infer_type(ctx, (pm_node_t *)bn->statements);
+        return vt_prim(SPINEL_TYPE_NIL);
+    }
+
     default:
         return vt_prim(SPINEL_TYPE_VALUE);
     }
@@ -1083,6 +1090,38 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
     }
     case PM_YIELD_NODE:
         /* yield nodes are handled during codegen */
+        break;
+    case PM_BEGIN_NODE: {
+        pm_begin_node_t *bn = (pm_begin_node_t *)node;
+        if (bn->statements) infer_pass(ctx, (pm_node_t *)bn->statements);
+        if (bn->rescue_clause) {
+            pm_rescue_node_t *rescue = bn->rescue_clause;
+            /* Register rescue => e as a string variable */
+            if (rescue->reference &&
+                PM_NODE_TYPE(rescue->reference) == PM_LOCAL_VARIABLE_TARGET_NODE) {
+                pm_local_variable_target_node_t *t =
+                    (pm_local_variable_target_node_t *)rescue->reference;
+                char *vn = cstr(ctx, t->name);
+                var_declare(ctx, vn, vt_prim(SPINEL_TYPE_STRING), false);
+                free(vn);
+            }
+            if (rescue->statements) infer_pass(ctx, (pm_node_t *)rescue->statements);
+            if (rescue->subsequent) infer_pass(ctx, (pm_node_t *)rescue->subsequent);
+        }
+        if (bn->ensure_clause) {
+            pm_ensure_node_t *ensure = bn->ensure_clause;
+            if (ensure->statements) infer_pass(ctx, (pm_node_t *)ensure->statements);
+        }
+        break;
+    }
+    case PM_RESCUE_MODIFIER_NODE: {
+        pm_rescue_modifier_node_t *rm = (pm_rescue_modifier_node_t *)node;
+        infer_pass(ctx, rm->expression);
+        infer_pass(ctx, rm->rescue_expression);
+        break;
+    }
+    case PM_RESCUE_NODE:
+    case PM_RETRY_NODE:
         break;
     case PM_CLASS_NODE:
     case PM_MODULE_NODE:
@@ -1304,14 +1343,18 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             }
         }
 
-        /* Infer top-level function param types from call sites */
+        /* Infer top-level function param types from call sites (using stack-based walk) */
         if (prog_root && PM_NODE_TYPE(prog_root) == PM_PROGRAM_NODE) {
             pm_program_node_t *prog = (pm_program_node_t *)prog_root;
             if (prog->statements) {
-                pm_statements_node_t *stmts = prog->statements;
-                for (size_t si = 0; si < stmts->body.size; si++) {
-                    pm_node_t *s = stmts->body.nodes[si];
-                    /* Look for call nodes that call our functions */
+                pm_node_t *tl_stack[256];
+                int tl_sp = 0;
+                for (size_t si = 0; si < prog->statements->body.size && tl_sp < 255; si++)
+                    tl_stack[tl_sp++] = prog->statements->body.nodes[si];
+                while (tl_sp > 0) {
+                    pm_node_t *s = tl_stack[--tl_sp];
+                    if (!s) continue;
+                    /* Check call nodes that call our functions */
                     if (PM_NODE_TYPE(s) == PM_CALL_NODE) {
                         pm_call_node_t *call = (pm_call_node_t *)s;
                         if (!call->receiver && call->arguments) {
@@ -1329,28 +1372,24 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                             }
                             free(cname);
                         }
-                    }
-                    /* Also check calls nested in puts/print: puts fib(34) */
-                    if (PM_NODE_TYPE(s) == PM_CALL_NODE) {
-                        pm_call_node_t *outer = (pm_call_node_t *)s;
-                        if (outer->arguments) {
-                            for (size_t ai = 0; ai < outer->arguments->arguments.size; ai++) {
-                                pm_node_t *arg = outer->arguments->arguments.nodes[ai];
+                        /* Also check calls nested in arguments: puts fib(34) */
+                        if (call->arguments) {
+                            for (size_t ai = 0; ai < call->arguments->arguments.size; ai++) {
+                                pm_node_t *arg = call->arguments->arguments.nodes[ai];
                                 if (PM_NODE_TYPE(arg) == PM_CALL_NODE) {
                                     pm_call_node_t *inner = (pm_call_node_t *)arg;
                                     if (!inner->receiver && inner->arguments) {
                                         char *iname = cstr(ctx, inner->name);
-                                        func_info_t *target = find_func(ctx, iname);
-                                        if (target) {
-                                            for (int pi = 0; pi < target->param_count &&
+                                        func_info_t *target2 = find_func(ctx, iname);
+                                        if (target2) {
+                                            for (int pi = 0; pi < target2->param_count &&
                                                  pi < (int)inner->arguments->arguments.size; pi++) {
-                                                if (target->params[pi].type.kind == SPINEL_TYPE_VALUE) {
+                                                if (target2->params[pi].type.kind == SPINEL_TYPE_VALUE) {
                                                     vtype_t at = infer_type(ctx, inner->arguments->arguments.nodes[pi]);
                                                     if (at.kind != SPINEL_TYPE_VALUE)
-                                                        target->params[pi].type = at;
+                                                        target2->params[pi].type = at;
                                                 }
                                             }
-                                            /* Note: return type will be inferred from function body later */
                                         }
                                         free(iname);
                                     }
@@ -1358,27 +1397,40 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                             }
                         }
                     }
-                    /* Also check calls inside assignments: var = func(arg) */
+                    /* Recurse into common statement types */
                     if (PM_NODE_TYPE(s) == PM_LOCAL_VARIABLE_WRITE_NODE) {
                         pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)s;
-                        if (PM_NODE_TYPE(lw->value) == PM_CALL_NODE) {
-                            pm_call_node_t *inner = (pm_call_node_t *)lw->value;
-                            if (!inner->receiver && inner->arguments) {
-                                char *iname = cstr(ctx, inner->name);
-                                func_info_t *target = find_func(ctx, iname);
-                                if (target) {
-                                    for (int pi = 0; pi < target->param_count &&
-                                         pi < (int)inner->arguments->arguments.size; pi++) {
-                                        if (target->params[pi].type.kind == SPINEL_TYPE_VALUE) {
-                                            vtype_t at = infer_type(ctx, inner->arguments->arguments.nodes[pi]);
-                                            if (at.kind != SPINEL_TYPE_VALUE)
-                                                target->params[pi].type = at;
-                                        }
-                                    }
-                                }
-                                free(iname);
-                            }
-                        }
+                        if (tl_sp < 255) tl_stack[tl_sp++] = lw->value;
+                    }
+                    if (PM_NODE_TYPE(s) == PM_STATEMENTS_NODE) {
+                        pm_statements_node_t *ss = (pm_statements_node_t *)s;
+                        for (size_t si2 = 0; si2 < ss->body.size && tl_sp < 255; si2++)
+                            tl_stack[tl_sp++] = ss->body.nodes[si2];
+                    }
+                    if (PM_NODE_TYPE(s) == PM_BEGIN_NODE) {
+                        pm_begin_node_t *bn = (pm_begin_node_t *)s;
+                        if (bn->statements && tl_sp < 255) tl_stack[tl_sp++] = (pm_node_t *)bn->statements;
+                        if (bn->rescue_clause && bn->rescue_clause->statements && tl_sp < 255)
+                            tl_stack[tl_sp++] = (pm_node_t *)bn->rescue_clause->statements;
+                        if (bn->ensure_clause && bn->ensure_clause->statements && tl_sp < 255)
+                            tl_stack[tl_sp++] = (pm_node_t *)bn->ensure_clause->statements;
+                    }
+                    if (PM_NODE_TYPE(s) == PM_IF_NODE) {
+                        pm_if_node_t *ifn = (pm_if_node_t *)s;
+                        if (ifn->statements && tl_sp < 255) tl_stack[tl_sp++] = (pm_node_t *)ifn->statements;
+                        if (ifn->subsequent && tl_sp < 255) tl_stack[tl_sp++] = (pm_node_t *)ifn->subsequent;
+                    }
+                    if (PM_NODE_TYPE(s) == PM_ELSE_NODE) {
+                        pm_else_node_t *en = (pm_else_node_t *)s;
+                        if (en->statements && tl_sp < 255) tl_stack[tl_sp++] = (pm_node_t *)en->statements;
+                    }
+                    if (PM_NODE_TYPE(s) == PM_WHILE_NODE) {
+                        pm_while_node_t *wn = (pm_while_node_t *)s;
+                        if (wn->statements && tl_sp < 255) tl_stack[tl_sp++] = (pm_node_t *)wn->statements;
+                    }
+                    if (PM_NODE_TYPE(s) == PM_LOCAL_VARIABLE_OPERATOR_WRITE_NODE) {
+                        pm_local_variable_operator_write_node_t *ow = (pm_local_variable_operator_write_node_t *)s;
+                        if (tl_sp < 255) tl_stack[tl_sp++] = ow->value;
                     }
                 }
             }
@@ -1391,13 +1443,18 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             /* Simple recursive scan: find CallNodes in the body */
             /* Walk statements looking for calls */
             pm_node_t *body = caller->body_node;
-            if (PM_NODE_TYPE(body) != PM_STATEMENTS_NODE) continue;
-            pm_statements_node_t *bstmts = (pm_statements_node_t *)body;
             /* Use a simple stack-based walk */
             pm_node_t *stack[256];
             int sp = 0;
-            for (size_t si = 0; si < bstmts->body.size && sp < 255; si++)
-                stack[sp++] = bstmts->body.nodes[si];
+            if (PM_NODE_TYPE(body) == PM_STATEMENTS_NODE) {
+                pm_statements_node_t *bstmts = (pm_statements_node_t *)body;
+                for (size_t si = 0; si < bstmts->body.size && sp < 255; si++)
+                    stack[sp++] = bstmts->body.nodes[si];
+            } else if (PM_NODE_TYPE(body) == PM_BEGIN_NODE) {
+                stack[sp++] = body;
+            } else {
+                continue;
+            }
             while (sp > 0) {
                 pm_node_t *cur = stack[--sp];
                 if (!cur) continue;
@@ -1450,6 +1507,14 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                 if (PM_NODE_TYPE(cur) == PM_LOCAL_VARIABLE_WRITE_NODE) {
                     pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)cur;
                     if (sp < 255) stack[sp++] = lw->value;
+                }
+                if (PM_NODE_TYPE(cur) == PM_BEGIN_NODE) {
+                    pm_begin_node_t *bn = (pm_begin_node_t *)cur;
+                    if (bn->statements && sp < 255) stack[sp++] = (pm_node_t *)bn->statements;
+                    if (bn->rescue_clause && bn->rescue_clause->statements && sp < 255)
+                        stack[sp++] = (pm_node_t *)bn->rescue_clause->statements;
+                    if (bn->ensure_clause && bn->ensure_clause->statements && sp < 255)
+                        stack[sp++] = (pm_node_t *)bn->ensure_clause->statements;
                 }
                 if (PM_NODE_TYPE(cur) == PM_ELSE_NODE) {
                     pm_else_node_t *en = (pm_else_node_t *)cur;
@@ -3287,6 +3352,19 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
             break;
         }
 
+        /* raise "msg" → sp_raise("msg") */
+        if (!call->receiver && strcmp(method, "raise") == 0) {
+            if (call->arguments && call->arguments->arguments.size > 0) {
+                char *msg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                emit(ctx, "sp_raise(%s);\n", msg);
+                free(msg);
+            } else {
+                emit(ctx, "sp_raise(\"RuntimeError\");\n");
+            }
+            free(method);
+            break;
+        }
+
         /* Array#each with block → inline for loop (statement context) */
         if (call->block && PM_NODE_TYPE(call->block) == PM_BLOCK_NODE &&
             strcmp(method, "each") == 0 && call->receiver) {
@@ -3501,6 +3579,114 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_ELSE_NODE: {
         pm_else_node_t *n = (pm_else_node_t *)node;
         if (n->statements) codegen_stmts(ctx, (pm_node_t *)n->statements);
+        break;
+    }
+
+    case PM_BEGIN_NODE: {
+        pm_begin_node_t *bn = (pm_begin_node_t *)node;
+        pm_rescue_node_t *rescue = bn->rescue_clause;
+        pm_ensure_node_t *ensure = bn->ensure_clause;
+
+        if (!rescue && !ensure) {
+            /* Plain begin...end with no rescue/ensure — just emit body */
+            if (bn->statements) codegen_stmts(ctx, (pm_node_t *)bn->statements);
+            break;
+        }
+
+        int exc_id = ctx->exc_counter++;
+
+        if (rescue) {
+            /* Check if rescue body contains retry (simple scan) */
+            bool has_retry = false;
+            if (rescue->statements) {
+                pm_statements_node_t *rs = rescue->statements;
+                for (size_t ri = 0; ri < rs->body.size; ri++) {
+                    pm_node_t *rn = rs->body.nodes[ri];
+                    if (PM_NODE_TYPE(rn) == PM_RETRY_NODE) { has_retry = true; break; }
+                    /* Also check modifier-if: retry if cond */
+                    if (PM_NODE_TYPE(rn) == PM_IF_NODE) {
+                        pm_if_node_t *ifn = (pm_if_node_t *)rn;
+                        if (ifn->statements) {
+                            pm_statements_node_t *ifs = ifn->statements;
+                            for (size_t ii = 0; ii < ifs->body.size; ii++)
+                                if (PM_NODE_TYPE(ifs->body.nodes[ii]) == PM_RETRY_NODE)
+                                    { has_retry = true; break; }
+                        }
+                    }
+                }
+            }
+            /* Only emit retry label if rescue body uses retry */
+            emit(ctx, "/* begin/rescue */\n");
+            if (has_retry)
+                emit_raw(ctx, "_sp_retry_%d: ;\n", exc_id);
+
+            emit(ctx, "sp_exc_depth++;\n");
+            emit(ctx, "if (setjmp(sp_exc_stack[sp_exc_depth - 1]) == 0) {\n");
+            ctx->indent++;
+
+            /* begin body */
+            if (bn->statements) codegen_stmts(ctx, (pm_node_t *)bn->statements);
+
+            ctx->indent--;
+            emit(ctx, "    sp_exc_depth--;\n");
+            emit(ctx, "} else {\n");
+            ctx->indent++;
+            emit(ctx, "sp_exc_depth--;\n");
+
+            /* rescue clause: handle `=> e` binding */
+            if (rescue->reference) {
+                if (PM_NODE_TYPE(rescue->reference) == PM_LOCAL_VARIABLE_TARGET_NODE) {
+                    pm_local_variable_target_node_t *t =
+                        (pm_local_variable_target_node_t *)rescue->reference;
+                    char *vn = cstr(ctx, t->name);
+                    char *cn = make_cname(vn, false);
+                    emit(ctx, "%s = sp_exc_message;\n", cn);
+                    free(vn); free(cn);
+                }
+            }
+
+            /* rescue body */
+            if (rescue->statements) codegen_stmts(ctx, (pm_node_t *)rescue->statements);
+
+            ctx->indent--;
+            emit(ctx, "}\n");
+
+        } else {
+            /* ensure without rescue — just emit body */
+            if (bn->statements) codegen_stmts(ctx, (pm_node_t *)bn->statements);
+        }
+
+        /* ensure clause */
+        if (ensure && ensure->statements)
+            codegen_stmts(ctx, (pm_node_t *)ensure->statements);
+
+        break;
+    }
+
+    case PM_RETRY_NODE: {
+        /* Find the nearest enclosing begin/rescue exc_id.
+         * We use the current exc_counter - 1 since the enclosing begin just incremented it. */
+        emit(ctx, "goto _sp_retry_%d;\n", ctx->exc_counter - 1);
+        break;
+    }
+
+    case PM_RESCUE_MODIFIER_NODE: {
+        /* expr rescue default_expr  → inline rescue */
+        pm_rescue_modifier_node_t *rm = (pm_rescue_modifier_node_t *)node;
+        int exc_id = ctx->exc_counter++;
+        emit(ctx, "sp_exc_depth++;\n");
+        emit(ctx, "if (setjmp(sp_exc_stack[sp_exc_depth - 1]) == 0) {\n");
+        ctx->indent++;
+        codegen_stmt(ctx, rm->expression);
+        ctx->indent--;
+        emit(ctx, "    sp_exc_depth--;\n");
+        emit(ctx, "} else {\n");
+        ctx->indent++;
+        emit(ctx, "sp_exc_depth--;\n");
+        codegen_stmt(ctx, rm->rescue_expression);
+        ctx->indent--;
+        emit(ctx, "}\n");
+        (void)exc_id;
         break;
     }
 
@@ -3851,6 +4037,7 @@ static void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
             if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
             else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
             else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
+            else if (v->type.kind == SPINEL_TYPE_STRING) init = " = NULL";
             emit(ctx, "%s %s%s;\n", ct, cn, init);
             free(ct); free(cn);
         }
@@ -3859,40 +4046,53 @@ static void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
          * This happens when the function body uses a variable name that also
          * exists at top-level (e.g., 'i' in a yield function). */
         if (f->body_node) {
-            /* Walk the function body to find all local variable writes */
+            /* Walk the function body to find all local variable writes/refs */
             pm_node_t *stack[256];
             int sp = 0;
             if (PM_NODE_TYPE(f->body_node) == PM_STATEMENTS_NODE) {
                 pm_statements_node_t *stmts = (pm_statements_node_t *)f->body_node;
                 for (size_t si = 0; si < stmts->body.size && sp < 255; si++)
                     stack[sp++] = stmts->body.nodes[si];
+            } else if (PM_NODE_TYPE(f->body_node) == PM_BEGIN_NODE) {
+                if (sp < 255) stack[sp++] = f->body_node;
             }
+            /* Track which shadow vars we've already emitted to avoid duplicates */
+            char emitted_shadows[16][64];
+            int emitted_shadow_count = 0;
             while (sp > 0) {
                 pm_node_t *cur = stack[--sp];
                 if (!cur) continue;
+                /* Helper: check if a variable name needs a local declaration */
+                #define CHECK_SHADOW_VAR(vname, vtype) do { \
+                    bool is_param = false; \
+                    for (int pi = 0; pi < f->param_count; pi++) \
+                        if (strcmp(f->params[pi].name, (vname)) == 0) { is_param = true; break; } \
+                    bool is_new_var = false; \
+                    for (int vi = saved_var_count + f->param_count; vi < ctx->var_count; vi++) \
+                        if (strcmp(ctx->vars[vi].name, (vname)) == 0) { is_new_var = true; break; } \
+                    bool already_emitted = false; \
+                    for (int ei = 0; ei < emitted_shadow_count; ei++) \
+                        if (strcmp(emitted_shadows[ei], (vname)) == 0) { already_emitted = true; break; } \
+                    if (!is_param && !is_new_var && !already_emitted) { \
+                        var_entry_t *v = var_lookup(ctx, (vname)); \
+                        vtype_t et = (v) ? v->type : (vtype); \
+                        char *ct = vt_ctype(ctx, et, false); \
+                        char *cn = make_cname((vname), false); \
+                        const char *init = ""; \
+                        if (et.kind == SPINEL_TYPE_INTEGER) init = " = 0"; \
+                        else if (et.kind == SPINEL_TYPE_FLOAT) init = " = 0.0"; \
+                        else if (et.kind == SPINEL_TYPE_STRING) init = " = NULL"; \
+                        emit(ctx, "%s %s%s;\n", ct, cn, init); \
+                        free(ct); free(cn); \
+                        if (emitted_shadow_count < 16) \
+                            snprintf(emitted_shadows[emitted_shadow_count++], 64, "%s", (vname)); \
+                    } \
+                } while(0)
+
                 if (PM_NODE_TYPE(cur) == PM_LOCAL_VARIABLE_WRITE_NODE) {
                     pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)cur;
                     char *vname = cstr(ctx, lw->name);
-                    /* Check if this is NOT a parameter and NOT a newly registered var */
-                    bool is_param = false;
-                    for (int pi = 0; pi < f->param_count; pi++)
-                        if (strcmp(f->params[pi].name, vname) == 0) { is_param = true; break; }
-                    bool is_new_var = false;
-                    for (int vi = saved_var_count + f->param_count; vi < ctx->var_count; vi++)
-                        if (strcmp(ctx->vars[vi].name, vname) == 0) { is_new_var = true; break; }
-                    if (!is_param && !is_new_var) {
-                        /* This var was already registered at outer scope; declare locally */
-                        var_entry_t *v = var_lookup(ctx, vname);
-                        if (v) {
-                            char *ct = vt_ctype(ctx, v->type, false);
-                            char *cn = make_cname(vname, false);
-                            const char *init = "";
-                            if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
-                            else if (v->type.kind == SPINEL_TYPE_FLOAT) init = " = 0.0";
-                            emit(ctx, "%s %s%s;\n", ct, cn, init);
-                            free(ct); free(cn);
-                        }
-                    }
+                    CHECK_SHADOW_VAR(vname, vt_prim(SPINEL_TYPE_VALUE));
                     free(vname);
                     if (sp < 255) stack[sp++] = lw->value;
                 }
@@ -3910,6 +4110,27 @@ static void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
                     if (ifn->statements && sp < 255) stack[sp++] = (pm_node_t *)ifn->statements;
                     if (ifn->subsequent && sp < 255) stack[sp++] = (pm_node_t *)ifn->subsequent;
                 }
+                if (PM_NODE_TYPE(cur) == PM_BEGIN_NODE) {
+                    pm_begin_node_t *bn = (pm_begin_node_t *)cur;
+                    if (bn->statements && sp < 255) stack[sp++] = (pm_node_t *)bn->statements;
+                    if (bn->rescue_clause) {
+                        pm_rescue_node_t *rescue = bn->rescue_clause;
+                        /* Handle rescue => e variable */
+                        if (rescue->reference &&
+                            PM_NODE_TYPE(rescue->reference) == PM_LOCAL_VARIABLE_TARGET_NODE) {
+                            pm_local_variable_target_node_t *t =
+                                (pm_local_variable_target_node_t *)rescue->reference;
+                            char *vname = cstr(ctx, t->name);
+                            CHECK_SHADOW_VAR(vname, vt_prim(SPINEL_TYPE_STRING));
+                            free(vname);
+                        }
+                        if (rescue->statements && sp < 255)
+                            stack[sp++] = (pm_node_t *)rescue->statements;
+                    }
+                    if (bn->ensure_clause && bn->ensure_clause->statements && sp < 255)
+                        stack[sp++] = (pm_node_t *)bn->ensure_clause->statements;
+                }
+                #undef CHECK_SHADOW_VAR
             }
         }
     }
@@ -4139,6 +4360,23 @@ static void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "}\n\n");
     }
 
+    /* ---- Exception handling runtime (only when needed) ---- */
+    if (ctx->needs_exc) {
+        emit_raw(ctx, "/* ---- Exception handling runtime (setjmp/longjmp) ---- */\n");
+        emit_raw(ctx, "#include <setjmp.h>\n");
+        emit_raw(ctx, "#define SP_EXC_STACK_SIZE 64\n");
+        emit_raw(ctx, "static jmp_buf sp_exc_stack[SP_EXC_STACK_SIZE];\n");
+        emit_raw(ctx, "static int sp_exc_depth = 0;\n");
+        emit_raw(ctx, "static const char *sp_exc_message = NULL;\n\n");
+        emit_raw(ctx, "static void sp_raise(const char *msg) {\n");
+        emit_raw(ctx, "    sp_exc_message = msg;\n");
+        emit_raw(ctx, "    if (sp_exc_depth > 0)\n");
+        emit_raw(ctx, "        longjmp(sp_exc_stack[sp_exc_depth - 1], 1);\n");
+        emit_raw(ctx, "    fprintf(stderr, \"unhandled exception: %%s\\n\", msg);\n");
+        emit_raw(ctx, "    exit(1);\n");
+        emit_raw(ctx, "}\n\n");
+    }
+
     /* Built-in sp_IntArray for Array support */
     emit_raw(ctx, "/* ---- Built-in integer array ---- */\n");
     /* sp_IntArray: deque-like array with O(1) shift via start offset */
@@ -4357,6 +4595,73 @@ static bool has_lambda_nodes(pm_node_t *node) {
     case PM_DEF_NODE: {
         pm_def_node_t *d = (pm_def_node_t *)node;
         return d->body ? has_lambda_nodes((pm_node_t *)d->body) : false;
+    }
+    default:
+        return false;
+    }
+}
+
+/* Check if AST contains any exception nodes (raise/rescue/begin) */
+static bool has_exception_nodes(codegen_ctx_t *ctx, pm_node_t *node) {
+    if (!node) return false;
+    if (PM_NODE_TYPE(node) == PM_BEGIN_NODE ||
+        PM_NODE_TYPE(node) == PM_RESCUE_NODE ||
+        PM_NODE_TYPE(node) == PM_RESCUE_MODIFIER_NODE ||
+        PM_NODE_TYPE(node) == PM_RETRY_NODE)
+        return true;
+
+    switch (PM_NODE_TYPE(node)) {
+    case PM_PROGRAM_NODE: {
+        pm_program_node_t *p = (pm_program_node_t *)node;
+        return p->statements ? has_exception_nodes(ctx, (pm_node_t *)p->statements) : false;
+    }
+    case PM_STATEMENTS_NODE: {
+        pm_statements_node_t *s = (pm_statements_node_t *)node;
+        for (size_t i = 0; i < s->body.size; i++)
+            if (has_exception_nodes(ctx, s->body.nodes[i])) return true;
+        return false;
+    }
+    case PM_LOCAL_VARIABLE_WRITE_NODE: {
+        pm_local_variable_write_node_t *n = (pm_local_variable_write_node_t *)node;
+        return has_exception_nodes(ctx, n->value);
+    }
+    case PM_CONSTANT_WRITE_NODE: {
+        pm_constant_write_node_t *n = (pm_constant_write_node_t *)node;
+        return has_exception_nodes(ctx, n->value);
+    }
+    case PM_CALL_NODE: {
+        pm_call_node_t *c = (pm_call_node_t *)node;
+        /* Check if this is a raise call */
+        if (!c->receiver && ceq(ctx, c->name, "raise")) return true;
+        if (c->receiver && has_exception_nodes(ctx, c->receiver)) return true;
+        if (c->arguments) {
+            for (size_t i = 0; i < c->arguments->arguments.size; i++)
+                if (has_exception_nodes(ctx, c->arguments->arguments.nodes[i])) return true;
+        }
+        if (c->block && has_exception_nodes(ctx, (pm_node_t *)c->block)) return true;
+        return false;
+    }
+    case PM_BLOCK_NODE: {
+        pm_block_node_t *b = (pm_block_node_t *)node;
+        return b->body ? has_exception_nodes(ctx, (pm_node_t *)b->body) : false;
+    }
+    case PM_DEF_NODE: {
+        pm_def_node_t *d = (pm_def_node_t *)node;
+        return d->body ? has_exception_nodes(ctx, (pm_node_t *)d->body) : false;
+    }
+    case PM_IF_NODE: {
+        pm_if_node_t *n = (pm_if_node_t *)node;
+        if (n->statements && has_exception_nodes(ctx, (pm_node_t *)n->statements)) return true;
+        if (n->subsequent && has_exception_nodes(ctx, (pm_node_t *)n->subsequent)) return true;
+        return false;
+    }
+    case PM_ELSE_NODE: {
+        pm_else_node_t *n = (pm_else_node_t *)node;
+        return n->statements ? has_exception_nodes(ctx, (pm_node_t *)n->statements) : false;
+    }
+    case PM_WHILE_NODE: {
+        pm_while_node_t *n = (pm_while_node_t *)node;
+        return n->statements ? has_exception_nodes(ctx, (pm_node_t *)n->statements) : false;
     }
     default:
         return false;
@@ -4729,6 +5034,9 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     /* Detect lambda mode */
     ctx->lambda_mode = has_lambda_nodes(root);
 
+    /* Detect exception handling mode */
+    ctx->needs_exc = has_exception_nodes(ctx, root);
+
     /* Pass 1: Analyze classes, modules, functions */
     class_analysis_pass(ctx, root);
 
@@ -5044,6 +5352,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         emit_raw(ctx, "    (void)argc; (void)argv;\n");
 
         /* Variable declarations for top-level (skip constants — they're global statics) */
+        const char *vol = ctx->needs_exc ? "volatile " : "";
         for (int i = 0; i < ctx->var_count; i++) {
             var_entry_t *v = &ctx->vars[i];
             if (v->is_constant) continue;
@@ -5071,7 +5380,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                 }
                 init = "";
             }
-            emit_raw(ctx, "    %s %s%s;\n", ct, cn, init);
+            emit_raw(ctx, "    %s%s %s%s;\n", vol, ct, cn, init);
             free(ct); free(cn);
         }
         emit_raw(ctx, "\n");
