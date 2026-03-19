@@ -1,24 +1,21 @@
-# Test alias
-
-class Greeter
-  def initialize(name)
-    @name = name
+class Temperature
+  attr_reader :degrees
+  def initialize(d)
+    @degrees = d
   end
-
-  def name
-    @name
+  def <=>(other)
+    @degrees - other.degrees
   end
-
-  def hello
-    @name
-  end
-
-  alias greet hello
+  def <(other); (self <=> other) < 0; end
+  def >(other); (self <=> other) > 0; end
+  def ==(other); (self <=> other) == 0; end
 end
 
-g = Greeter.new("world")
-puts g.hello  # world
-puts g.greet  # world (alias of hello)
-puts g.name   # world
-
+t1 = Temperature.new(100)
+t2 = Temperature.new(200)
+t3 = Temperature.new(100)
+puts t1 < t2    # true
+puts t2 > t1    # true
+puts t1 == t3   # true
+puts t1 > t2    # false
 puts "done"

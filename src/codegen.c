@@ -1029,6 +1029,28 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
             }
         }
 
+        /* Constructor: ClassName.new(...) — check early before binary ops */
+        if (strcmp(method, "new") == 0 && call->receiver &&
+            PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE) {
+            pm_constant_read_node_t *cr = (pm_constant_read_node_t *)call->receiver;
+            char *cls_name = cstr(ctx, cr->name);
+            if (strcmp(cls_name, "Array") == 0) {
+                int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
+                if (argc == 0) {
+                    free(cls_name); free(method);
+                    return vt_prim(SPINEL_TYPE_ARRAY);
+                }
+                free(cls_name); free(method);
+                return vt_prim(SPINEL_TYPE_VALUE);
+            }
+            if (find_class(ctx, cls_name)) {
+                result = vt_obj(cls_name);
+                free(cls_name); free(method);
+                return result;
+            }
+            free(cls_name);
+        }
+
         /* Binary operators */
         if (call->receiver && call->arguments &&
             call->arguments->arguments.size == 1 &&
@@ -1383,6 +1405,11 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         pm_match_write_node_t *mw = (pm_match_write_node_t *)node;
         return infer_type(ctx, (pm_node_t *)mw->call);
     }
+
+    case PM_SELF_NODE:
+        if (ctx->current_class)
+            return vt_obj(ctx->current_class->name);
+        return vt_prim(SPINEL_TYPE_VALUE);
 
     default:
         return vt_prim(SPINEL_TYPE_VALUE);
@@ -1946,6 +1973,14 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                         }
                     }
                     /* Recurse into statement types */
+                    if (PM_NODE_TYPE(s) == PM_CALL_NODE) {
+                        pm_call_node_t *cc = (pm_call_node_t *)s;
+                        if (cc->receiver && ms_sp < 255) ms_stack[ms_sp++] = cc->receiver;
+                        if (cc->arguments) {
+                            for (size_t ai = 0; ai < cc->arguments->arguments.size && ms_sp < 255; ai++)
+                                ms_stack[ms_sp++] = cc->arguments->arguments.nodes[ai];
+                        }
+                    }
                     if (PM_NODE_TYPE(s) == PM_LOCAL_VARIABLE_WRITE_NODE) {
                         pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)s;
                         if (ms_sp < 255) ms_stack[ms_sp++] = lw->value;
@@ -3394,7 +3429,7 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                                 free(args); free(a);
                                 args = na;
                             }
-                            char *r = sfmt("sp_%s_%s(%s)", cls_name, method, args);
+                            char *r = sfmt("sp_%s_%s(%s)", cls_name, sanitize_method(method), args);
                             free(cls_name); free(args); free(method);
                             return r;
                         }
@@ -4032,15 +4067,16 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                             args = na;
                         }
 
+                        const char *c_mname = sanitize_method(method);
                         char *r;
                         if (owner && owner != cls) {
                             /* Inherited method: cast receiver to parent type */
                             if (cls->is_value_type)
-                                r = sfmt("sp_%s_%s(%s%s)", owner->name, method, recv, args);
+                                r = sfmt("sp_%s_%s(%s%s)", owner->name, c_mname, recv, args);
                             else
-                                r = sfmt("sp_%s_%s((sp_%s *)%s%s)", owner->name, method, owner->name, recv, args);
+                                r = sfmt("sp_%s_%s((sp_%s *)%s%s)", owner->name, c_mname, owner->name, recv, args);
                         } else {
-                            r = sfmt("sp_%s_%s(%s%s)", recv_t.klass, method, recv, args);
+                            r = sfmt("sp_%s_%s(%s%s)", recv_t.klass, c_mname, recv, args);
                         }
                         free(recv); free(args); free(method);
                         return r;
@@ -4111,16 +4147,17 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     free(args); free(a);
                     args = na;
                 }
+                const char *c_mname = sanitize_method(method);
                 char *r;
                 if (owner && owner != ctx->current_class) {
                     /* Inherited method: cast self to parent type */
                     if (ctx->current_class->is_value_type)
-                        r = sfmt("sp_%s_%s(self%s)", owner->name, method, args);
+                        r = sfmt("sp_%s_%s(self%s)", owner->name, c_mname, args);
                     else
-                        r = sfmt("sp_%s_%s((sp_%s *)self%s)", owner->name, method, owner->name, args);
+                        r = sfmt("sp_%s_%s((sp_%s *)self%s)", owner->name, c_mname, owner->name, args);
                 } else {
                     r = sfmt("sp_%s_%s(self%s)",
-                                   ctx->current_class->name, method, args);
+                                   ctx->current_class->name, c_mname, args);
                 }
                 free(args); free(method);
                 return r;
@@ -4803,10 +4840,11 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     else
                         r = sfmt("sp_%s_initialize((sp_%s *)self%s)", parent->name, parent->name, args);
                 } else {
+                    const char *c_mname = sanitize_method(ctx->current_method->name);
                     if (ctx->current_class->is_value_type)
-                        r = sfmt("sp_%s_%s(self%s)", parent->name, ctx->current_method->name, args);
+                        r = sfmt("sp_%s_%s(self%s)", parent->name, c_mname, args);
                     else
-                        r = sfmt("sp_%s_%s((sp_%s *)self%s)", parent->name, ctx->current_method->name, parent->name, args);
+                        r = sfmt("sp_%s_%s((sp_%s *)self%s)", parent->name, c_mname, parent->name, args);
                 }
                 free(args);
                 return r;
@@ -4875,6 +4913,9 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
         pm_match_write_node_t *mw = (pm_match_write_node_t *)node;
         return codegen_expr(ctx, (pm_node_t *)mw->call);
     }
+
+    case PM_SELF_NODE:
+        return xstrdup("self");
 
     default:
         return sfmt("0 /* TODO: expr %d */", PM_NODE_TYPE(node));
@@ -6111,9 +6152,10 @@ static void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m)
     char *ret_ct = vt_ctype(ctx, m->return_type, false);
     bool ret_void = (m->return_type.kind == SPINEL_TYPE_NIL);
 
-    /* Function signature */
+    /* Function signature — sanitize operator method names for C identifiers */
+    const char *c_mname = sanitize_method(m->name);
     emit_raw(ctx, "static %s sp_%s_%s(",
-             ret_void ? "void" : ret_ct, cls->name, m->name);
+             ret_void ? "void" : ret_ct, cls->name, c_mname);
 
     if (m->is_class_method) {
         /* Class method: no self parameter */
@@ -8319,6 +8361,44 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     /* Constructors */
     for (int i = 0; i < ctx->class_count; i++)
         emit_constructor(ctx, &ctx->classes[i]);
+
+    /* Forward declarations for class methods (sanitize operator names) */
+    for (int i = 0; i < ctx->class_count; i++) {
+        class_info_t *cls = &ctx->classes[i];
+        for (int j = 0; j < cls->method_count; j++) {
+            method_info_t *m = &cls->methods[j];
+            if (strcmp(m->name, "initialize") == 0) continue;
+            if (m->is_getter || m->is_setter) continue;
+            const char *c_mname = sanitize_method(m->name);
+            char *ret_ct = vt_ctype(ctx, m->return_type, false);
+            bool ret_void = (m->return_type.kind == SPINEL_TYPE_NIL);
+            emit_raw(ctx, "static %s sp_%s_%s(",
+                     ret_void ? "void" : ret_ct, cls->name, c_mname);
+            if (m->is_class_method) {
+                for (int k = 0; k < m->param_count; k++) {
+                    if (k > 0) emit_raw(ctx, ", ");
+                    char *pct = vt_ctype(ctx, m->params[k].type, false);
+                    emit_raw(ctx, "%s", pct);
+                    free(pct);
+                }
+                if (m->param_count == 0) emit_raw(ctx, "void");
+            } else {
+                if (cls->is_value_type)
+                    emit_raw(ctx, "sp_%s", cls->name);
+                else
+                    emit_raw(ctx, "sp_%s *", cls->name);
+                for (int k = 0; k < m->param_count; k++) {
+                    emit_raw(ctx, ", ");
+                    char *pct = vt_ctype(ctx, m->params[k].type, !cls->is_value_type);
+                    emit_raw(ctx, "%s", pct);
+                    free(pct);
+                }
+            }
+            emit_raw(ctx, ");\n");
+            free(ret_ct);
+        }
+    }
+    emit_raw(ctx, "\n");
 
     /* Class methods */
     for (int i = 0; i < ctx->class_count; i++) {
