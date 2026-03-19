@@ -2701,6 +2701,15 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
         return buf;
     }
 
+    case PM_GLOBAL_VARIABLE_READ_NODE: {
+        pm_global_variable_read_node_t *n = (pm_global_variable_read_node_t *)node;
+        char *gname = cstr(ctx, n->name);
+        if (strcmp(gname, "$stderr") == 0) { free(gname); return xstrdup("stderr"); }
+        if (strcmp(gname, "$stdout") == 0) { free(gname); return xstrdup("stdout"); }
+        free(gname);
+        return xstrdup("0 /* unsupported global */");
+    }
+
     case PM_LOCAL_VARIABLE_READ_NODE: {
         pm_local_variable_read_node_t *n = (pm_local_variable_read_node_t *)node;
         char *name = cstr(ctx, n->name);
@@ -2712,12 +2721,15 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_CONSTANT_READ_NODE: {
         pm_constant_read_node_t *n = (pm_constant_read_node_t *)node;
         char *name = cstr(ctx, n->name);
+        /* ARGV → sp_argv (built at program start from argc/argv) */
+        if (strcmp(name, "ARGV") == 0) {
+            free(name);
+            return xstrdup("sp_argv");
+        }
         /* Check if it's a class name used for ::method */
         if (find_class(ctx, name) || find_module(ctx, name)) {
-            /* Will be handled by the call node that uses it */
-            return name; /* raw class name */
+            return name;
         }
-        /* Check module constants when inside a module */
         if (ctx->current_module) {
             for (int i = 0; i < ctx->current_module->const_count; i++) {
                 if (strcmp(ctx->current_module->consts[i].name, name) == 0) {
@@ -3137,6 +3149,16 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 char *r = sfmt("(%s %s %s)", left, c_op, right);
                 free(left); free(right); free(method);
                 return r;
+            }
+        }
+
+        /* ARGV.length → sp_argv.len */
+        if (call->receiver && PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE &&
+            strcmp(method, "length") == 0) {
+            pm_constant_read_node_t *cr = (pm_constant_read_node_t *)call->receiver;
+            if (ceq(ctx, cr->name, "ARGV")) {
+                free(method);
+                return xstrdup("sp_argv.len");
             }
         }
 
@@ -5119,6 +5141,36 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
             break;
 
         char *method = cstr(ctx, call->name);
+
+        /* $stderr.puts / $stdout.puts */
+        if (call->receiver && PM_NODE_TYPE(call->receiver) == PM_GLOBAL_VARIABLE_READ_NODE &&
+            strcmp(method, "puts") == 0) {
+            pm_global_variable_read_node_t *gv = (pm_global_variable_read_node_t *)call->receiver;
+            char *gname = cstr(ctx, gv->name);
+            const char *stream = strcmp(gname, "$stderr") == 0 ? "stderr" : "stdout";
+            if (call->arguments && call->arguments->arguments.size > 0) {
+                char *ae = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                emit(ctx, "fprintf(%s, \"%%s\\n\", %s);\n", stream, ae);
+                free(ae);
+            } else {
+                emit(ctx, "fputc('\\n', %s);\n", stream);
+            }
+            free(gname); free(method);
+            break;
+        }
+
+        /* Kernel#exit */
+        if (!call->receiver && strcmp(method, "exit") == 0) {
+            if (call->arguments && call->arguments->arguments.size > 0) {
+                char *code = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                emit(ctx, "exit((int)%s);\n", code);
+                free(code);
+            } else {
+                emit(ctx, "exit(0);\n");
+            }
+            free(method);
+            break;
+        }
 
         /* puts: output + newline */
         if (!call->receiver && strcmp(method, "puts") == 0) {
@@ -8361,8 +8413,13 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         }
 
         /* Main function */
+        emit_raw(ctx, "/* ARGV support */\n");
+        emit_raw(ctx, "typedef struct { const char **data; mrb_int len; } sp_Argv;\n");
+        emit_raw(ctx, "static sp_Argv sp_argv;\n");
+        emit_raw(ctx, "static mrb_int sp_Argv_length(sp_Argv *a) { return a->len; }\n\n");
+
         emit_raw(ctx, "int main(int argc, char **argv) {\n");
-        emit_raw(ctx, "    (void)argc; (void)argv;\n");
+        emit_raw(ctx, "    sp_argv.data = (const char **)(argv + 1); sp_argv.len = argc - 1;\n");
 
         /* Variable declarations for top-level (skip constants — they're global statics) */
         const char *vol = ctx->needs_exc ? "volatile " : "";
