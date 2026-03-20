@@ -75,9 +75,9 @@ typedef struct {
 } method_info_t;
 
 /* Class info */
-#define MAX_IVARS 16
-#define MAX_METHODS 32
-#define MAX_INCLUDES 8
+#define MAX_IVARS 32
+#define MAX_METHODS 64
+#define MAX_INCLUDES 16
 typedef struct {
     char name[64];
     char superclass[64];   /* superclass name ("" if none) */
@@ -142,10 +142,10 @@ typedef struct {
     int array_size;
 } var_entry_t;
 
-#define MAX_VARS 256
-#define MAX_CLASSES 16
-#define MAX_MODULES 8
-#define MAX_FUNCS 16
+#define MAX_VARS 1024
+#define MAX_CLASSES 128
+#define MAX_MODULES 64
+#define MAX_FUNCS 128
 
 /* Code generation context */
 typedef struct {
@@ -264,7 +264,7 @@ typedef struct {
     const char *source_path;
 
     /* Required files (kept alive for AST references in method_info_t) */
-    #define MAX_REQUIRED_FILES 16
+    #define MAX_REQUIRED_FILES 80
     struct {
         pm_parser_t parser;
         pm_node_t *root;

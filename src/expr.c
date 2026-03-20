@@ -1745,6 +1745,32 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     return sfmt("_sb_%d", tmp);
                 }
 
+                /* Array#zip(other) → sp_RbArray of 2-element sp_RbArray pairs */
+                if (strcmp(method, "zip") == 0 && call->arguments &&
+                    call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    ctx->needs_rb_array = true;
+                    ctx->needs_poly = true;
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "sp_RbArray *_zip_%d = sp_RbArray_new();\n", tmp);
+                    emit(ctx, "{ mrb_int _za_%d = sp_IntArray_length(%s);\n", tmp, recv);
+                    emit(ctx, "  mrb_int _zb_%d = sp_IntArray_length(%s);\n", tmp, arg);
+                    emit(ctx, "  for (mrb_int _zi_%d = 0; _zi_%d < _za_%d; _zi_%d++) {\n",
+                         tmp, tmp, tmp, tmp);
+                    emit(ctx, "    sp_RbArray *_zp_%d = sp_RbArray_new();\n", tmp);
+                    emit(ctx, "    sp_RbArray_push(_zp_%d, sp_box_int(sp_IntArray_get(%s, _zi_%d)));\n",
+                         tmp, recv, tmp);
+                    emit(ctx, "    sp_RbArray_push(_zp_%d, _zi_%d < _zb_%d ? sp_box_int(sp_IntArray_get(%s, _zi_%d)) : sp_box_nil());\n",
+                         tmp, tmp, tmp, arg, tmp);
+                    emit(ctx, "    sp_RbArray_push(_zip_%d, sp_box_obj(SP_T_OBJECT, _zp_%d));\n",
+                         tmp, tmp);
+                    emit(ctx, "  }\n");
+                    emit(ctx, "}\n");
+                    free(arg);
+                    free(recv); free(method);
+                    return sfmt("_zip_%d", tmp);
+                }
+
                 free(recv);
             }
 
@@ -1759,6 +1785,23 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     char *idx = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                     r = sfmt("sp_RbArray_get(%s, %s)", recv, idx);
                     free(idx);
+                }
+                else if (strcmp(method, "to_h") == 0) {
+                    /* RbArray#to_h → sp_RbHash (each element is a 2-element RbArray pair) */
+                    ctx->needs_rb_hash = true;
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "sp_RbHash *_toh_%d = sp_RbHash_new();\n", tmp);
+                    emit(ctx, "for (mrb_int _ti_%d = 0; _ti_%d < sp_RbArray_length(%s); _ti_%d++) {\n",
+                         tmp, tmp, recv, tmp);
+                    ctx->indent++;
+                    emit(ctx, "sp_RbValue _pair_%d = sp_RbArray_get(%s, _ti_%d);\n", tmp, recv, tmp);
+                    emit(ctx, "sp_RbArray *_p_%d = (sp_RbArray *)sp_unbox_obj(_pair_%d);\n", tmp, tmp);
+                    emit(ctx, "const char *_pk_%d = sp_unbox_str(sp_RbArray_get(_p_%d, 0));\n", tmp, tmp);
+                    emit(ctx, "sp_RbValue _pv_%d = sp_RbArray_get(_p_%d, 1);\n", tmp, tmp);
+                    emit(ctx, "sp_RbHash_set(_toh_%d, _pk_%d, _pv_%d);\n", tmp, tmp, tmp);
+                    ctx->indent--;
+                    emit(ctx, "}\n");
+                    r = sfmt("_toh_%d", tmp);
                 }
                 if (r) {
                     free(recv); free(method);
@@ -1818,6 +1861,41 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("sp_StrIntHash_merge(%s, %s)", recv, arg);
                     free(arg);
                 }
+                else if (strcmp(method, "transform_values") == 0 && call->block &&
+                         PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                    /* Hash#transform_values { |v| expr } → new sp_StrIntHash */
+                    pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                    char *bpname = extract_block_param(ctx, blk);
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "sp_StrIntHash *_tv_%d = sp_StrIntHash_new();\n", tmp);
+                    emit(ctx, "for (sp_HashEntry *_tve_%d = %s->first; _tve_%d; _tve_%d = _tve_%d->order_next) {\n",
+                         tmp, recv, tmp, tmp, tmp);
+                    ctx->indent++;
+                    if (bpname) {
+                        char *cn = make_cname(bpname, false);
+                        emit(ctx, "mrb_int %s = _tve_%d->value;\n", cn, tmp);
+                        free(cn);
+                    }
+                    char *body_expr = NULL;
+                    if (blk->body) {
+                        pm_node_t *body = (pm_node_t *)blk->body;
+                        if (PM_NODE_TYPE(body) == PM_STATEMENTS_NODE) {
+                            pm_statements_node_t *stmts = (pm_statements_node_t *)body;
+                            if (stmts->body.size > 0)
+                                body_expr = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                        } else {
+                            body_expr = codegen_expr(ctx, body);
+                        }
+                    }
+                    if (body_expr) {
+                        emit(ctx, "sp_StrIntHash_set(_tv_%d, _tve_%d->key, %s);\n", tmp, tmp, body_expr);
+                        free(body_expr);
+                    }
+                    ctx->indent--;
+                    emit(ctx, "}\n");
+                    free(bpname);
+                    r = sfmt("_tv_%d", tmp);
+                }
                 if (r) {
                     free(recv); free(method);
                     return r;
@@ -1863,6 +1941,64 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                     r = sfmt("sp_RbHash_merge(%s, %s)", recv, arg);
                     free(arg);
+                }
+                else if (strcmp(method, "transform_values") == 0 && call->block &&
+                         PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                    /* RbHash#transform_values { |v| expr } → new sp_RbHash */
+                    pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                    char *bpname = extract_block_param(ctx, blk);
+                    int tmp = ctx->temp_counter++;
+                    /* Temporarily register block param as POLY */
+                    int saved_vc = ctx->var_count;
+                    vtype_t saved_type = {0};
+                    var_entry_t *existing_v = bpname ? var_lookup(ctx, bpname) : NULL;
+                    if (existing_v) {
+                        saved_type = existing_v->type;
+                        existing_v->type = vt_prim(SPINEL_TYPE_POLY);
+                    } else if (bpname) {
+                        assert(ctx->var_count < MAX_VARS);
+                        var_entry_t *nv = &ctx->vars[ctx->var_count++];
+                        snprintf(nv->name, sizeof(nv->name), "%s", bpname);
+                        nv->type = vt_prim(SPINEL_TYPE_POLY);
+                        nv->declared = false;
+                        nv->is_constant = false;
+                    }
+                    emit(ctx, "sp_RbHash *_tv_%d = sp_RbHash_new();\n", tmp);
+                    emit(ctx, "for (sp_RbHashEntry *_tve_%d = %s->first; _tve_%d; _tve_%d = _tve_%d->order_next) {\n",
+                         tmp, recv, tmp, tmp, tmp);
+                    ctx->indent++;
+                    if (bpname) {
+                        char *cn = make_cname(bpname, false);
+                        emit(ctx, "sp_RbValue %s = _tve_%d->value;\n", cn, tmp);
+                        free(cn);
+                    }
+                    char *body_expr = NULL;
+                    if (blk->body) {
+                        pm_node_t *body = (pm_node_t *)blk->body;
+                        if (PM_NODE_TYPE(body) == PM_STATEMENTS_NODE) {
+                            pm_statements_node_t *stmts = (pm_statements_node_t *)body;
+                            if (stmts->body.size > 0)
+                                body_expr = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                        } else {
+                            body_expr = codegen_expr(ctx, body);
+                        }
+                    }
+                    if (body_expr) {
+                        vtype_t body_t = blk->body ? infer_type(ctx, (pm_node_t *)blk->body) : vt_prim(SPINEL_TYPE_NIL);
+                        char *boxed = poly_box_expr_vt(ctx, body_t, body_expr);
+                        emit(ctx, "sp_RbHash_set(_tv_%d, _tve_%d->key, %s);\n", tmp, tmp, boxed);
+                        free(body_expr); free(boxed);
+                    }
+                    ctx->indent--;
+                    emit(ctx, "}\n");
+                    /* Restore var table */
+                    if (existing_v) {
+                        existing_v->type = saved_type;
+                    } else {
+                        ctx->var_count = saved_vc;
+                    }
+                    free(bpname);
+                    r = sfmt("_tv_%d", tmp);
                 }
                 if (r) {
                     free(recv); free(method);
