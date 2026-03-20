@@ -257,6 +257,15 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         char *method = cstr(ctx, call->name);
         vtype_t result = vt_prim(SPINEL_TYPE_VALUE);
 
+        /* N.times.map { block } → IntArray */
+        if (strcmp(method, "map") == 0 && call->receiver &&
+            PM_NODE_TYPE(call->receiver) == PM_CALL_NODE) {
+            pm_call_node_t *inner = (pm_call_node_t *)call->receiver;
+            if (ceq(ctx, inner->name, "times")) {
+                free(method); return vt_prim(SPINEL_TYPE_ARRAY);
+            }
+        }
+
         /* Array indexing: infer element type from variable name heuristics
          * (must be checked before binary operators since [] has one argument) */
         if (strcmp(method, "[]") == 0 && call->receiver) {
@@ -533,7 +542,8 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "to_a") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_RANGE); }
                 if (strcmp(method, "sum") == 0 || strcmp(method, "length") == 0 ||
-                    strcmp(method, "size") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                    strcmp(method, "size") == 0 || strcmp(method, "count") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                if (strcmp(method, "map") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
             }
             /* String array methods */
             if (recv_t.kind == SPINEL_TYPE_STR_ARRAY) {

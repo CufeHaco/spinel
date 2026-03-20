@@ -244,6 +244,35 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
 
         char *method = cstr(ctx, call->name);
 
+        /* N.times.map { |i| expr } → build IntArray from 0..N-1 */
+        if (strcmp(method, "map") == 0 && call->receiver &&
+            PM_NODE_TYPE(call->receiver) == PM_CALL_NODE && call->block &&
+            PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+            pm_call_node_t *inner = (pm_call_node_t *)call->receiver;
+            if (ceq(ctx, inner->name, "times") && inner->receiver) {
+                char *count = codegen_expr(ctx, inner->receiver);
+                pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                char *bpname = extract_block_param(ctx, blk);
+                int tmp = ctx->temp_counter++;
+                char *cn = bpname ? make_cname(bpname, false) : sfmt("_ti_%d", tmp);
+                emit(ctx, "sp_IntArray *_tmap_%d = sp_IntArray_new();\n", tmp);
+                emit(ctx, "for (mrb_int %s = 0; %s < %s; %s++) {\n", cn, cn, count, cn);
+                ctx->indent++;
+                if (blk->body) {
+                    pm_statements_node_t *stmts = (pm_statements_node_t *)blk->body;
+                    if (stmts->body.size > 0) {
+                        char *val = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                        emit(ctx, "sp_IntArray_push(_tmap_%d, %s);\n", tmp, val);
+                        free(val);
+                    }
+                }
+                ctx->indent--;
+                emit(ctx, "}\n");
+                free(cn); free(bpname); free(count); free(method);
+                return sfmt("_tmap_%d", tmp);
+            }
+        }
+
         /* Proc#call: receiver.call(arg) → sp_Proc_call(receiver, arg) */
         if (call->receiver && strcmp(method, "call") == 0 && !ctx->lambda_mode) {
             vtype_t recv_t = infer_type(ctx, call->receiver);
@@ -1780,6 +1809,29 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 }
                 else if (strcmp(method, "to_a") == 0)
                     r = sfmt("sp_Range_to_a(%s)", recv);
+                else if (strcmp(method, "sum") == 0 && call->block &&
+                         PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                    /* Range#sum { |x| expr } → accumulate block results */
+                    pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                    char *bpname = extract_block_param(ctx, blk);
+                    int tmp = ctx->temp_counter++;
+                    char *cn = bpname ? make_cname(bpname, false) : xstrdup("_ri");
+                    emit(ctx, "mrb_int _rsum_%d = 0;\n", tmp);
+                    emit(ctx, "for (mrb_int %s = (%s).first; %s <= (%s).last; %s++) {\n", cn, recv, cn, recv, cn);
+                    ctx->indent++;
+                    if (blk->body) {
+                        pm_statements_node_t *stmts = (pm_statements_node_t *)blk->body;
+                        if (stmts->body.size > 0) {
+                            char *val = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                            emit(ctx, "_rsum_%d += %s;\n", tmp, val);
+                            free(val);
+                        }
+                    }
+                    ctx->indent--;
+                    emit(ctx, "}\n");
+                    free(cn); free(bpname);
+                    r = sfmt("_rsum_%d", tmp);
+                }
                 else if (strcmp(method, "sum") == 0) {
                     int tmp = ctx->temp_counter++;
                     emit(ctx, "mrb_int _rsum_%d = 0; { mrb_int _ri_%d;\n", tmp, tmp);
@@ -1787,6 +1839,54 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     emit(ctx, "    _rsum_%d += _ri_%d;\n", tmp, tmp);
                     emit(ctx, "}\n");
                     r = sfmt("_rsum_%d", tmp);
+                }
+                else if (strcmp(method, "count") == 0 && call->block &&
+                         PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                    /* Range#count { |x| cond } → count matching elements */
+                    pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                    char *bpname = extract_block_param(ctx, blk);
+                    int tmp = ctx->temp_counter++;
+                    char *cn = bpname ? make_cname(bpname, false) : xstrdup("_ri");
+                    emit(ctx, "mrb_int _rcnt_%d = 0;\n", tmp);
+                    emit(ctx, "for (mrb_int %s = (%s).first; %s <= (%s).last; %s++) {\n", cn, recv, cn, recv, cn);
+                    ctx->indent++;
+                    if (blk->body) {
+                        pm_statements_node_t *stmts = (pm_statements_node_t *)blk->body;
+                        if (stmts->body.size > 0) {
+                            char *cond = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                            emit(ctx, "if (%s) _rcnt_%d++;\n", cond, tmp);
+                            free(cond);
+                        }
+                    }
+                    ctx->indent--;
+                    emit(ctx, "}\n");
+                    free(cn); free(bpname);
+                    r = sfmt("_rcnt_%d", tmp);
+                }
+                else if (strcmp(method, "count") == 0)
+                    r = sfmt("((%s).last - (%s).first + 1)", recv, recv);
+                else if (strcmp(method, "map") == 0 && call->block &&
+                         PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                    /* Range#map { |x| expr } → IntArray */
+                    pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                    char *bpname = extract_block_param(ctx, blk);
+                    int tmp = ctx->temp_counter++;
+                    char *cn = bpname ? make_cname(bpname, false) : xstrdup("_ri");
+                    emit(ctx, "sp_IntArray *_rmap_%d = sp_IntArray_new();\n", tmp);
+                    emit(ctx, "for (mrb_int %s = (%s).first; %s <= (%s).last; %s++) {\n", cn, recv, cn, recv, cn);
+                    ctx->indent++;
+                    if (blk->body) {
+                        pm_statements_node_t *stmts = (pm_statements_node_t *)blk->body;
+                        if (stmts->body.size > 0) {
+                            char *val = codegen_expr(ctx, stmts->body.nodes[stmts->body.size - 1]);
+                            emit(ctx, "sp_IntArray_push(_rmap_%d, %s);\n", tmp, val);
+                            free(val);
+                        }
+                    }
+                    ctx->indent--;
+                    emit(ctx, "}\n");
+                    free(cn); free(bpname);
+                    r = sfmt("_rmap_%d", tmp);
                 }
                 else if (strcmp(method, "length") == 0 || strcmp(method, "size") == 0)
                     r = sfmt("((%s).last - (%s).first + 1)", recv, recv);
