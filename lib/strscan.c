@@ -11,12 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-/* Use Ruby's oniguruma header if standalone not available */
-#if __has_include(<oniguruma.h>)
 #include <oniguruma.h>
-#else
-#include <ruby/oniguruma.h>
-#endif
 
 typedef struct {
     const char *source;  /* original string (not owned) */
