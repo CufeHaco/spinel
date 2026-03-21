@@ -266,6 +266,16 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
 
         char *method = cstr(ctx, call->name);
 
+        /* Skip visibility/mixin directives in expression context */
+        if (!call->receiver && (strcmp(method, "private") == 0 ||
+            strcmp(method, "protected") == 0 || strcmp(method, "public") == 0 ||
+            strcmp(method, "extend") == 0 || strcmp(method, "include") == 0 ||
+            strcmp(method, "def_delegators") == 0 ||
+            strcmp(method, "frozen_string_literal") == 0)) {
+            free(method);
+            return xstrdup("0");
+        }
+
         /* N.times.map { |i| expr } → build IntArray from 0..N-1 */
         if (strcmp(method, "map") == 0 && call->receiver &&
             PM_NODE_TYPE(call->receiver) == PM_CALL_NODE && call->block &&
