@@ -2059,6 +2059,37 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     for (int i = 0; i < ctx->class_count; i++)
         ctx->classes[i].class_tag = 0x0040 + i; /* NaN-box class tag base */
 
+    /* Detect needs from class ivars and method params/returns */
+    for (int ci = 0; ci < ctx->class_count; ci++) {
+        class_info_t *cls = &ctx->classes[ci];
+        for (int ii = 0; ii < cls->ivar_count; ii++) {
+            spinel_type_t k = cls->ivars[ii].type.kind;
+            if (k == SPINEL_TYPE_SP_STRING) ctx->needs_sp_string = true;
+            if (k == SPINEL_TYPE_HASH) ctx->needs_hash = true;
+            if (k == SPINEL_TYPE_ARRAY) ctx->needs_gc = true;
+            if (k == SPINEL_TYPE_RB_ARRAY) { ctx->needs_rb_array = true; ctx->needs_poly = true; }
+            if (k == SPINEL_TYPE_RB_HASH) { ctx->needs_rb_hash = true; ctx->needs_poly = true; }
+            if (k == SPINEL_TYPE_STR_ARRAY) ctx->needs_str_split = true;
+            if (k == SPINEL_TYPE_POLY) ctx->needs_poly = true;
+        }
+        for (int mi = 0; mi < cls->method_count; mi++) {
+            method_info_t *m = &cls->methods[mi];
+            spinel_type_t rk = m->return_type.kind;
+            if (rk == SPINEL_TYPE_HASH) ctx->needs_hash = true;
+            if (rk == SPINEL_TYPE_RB_ARRAY) { ctx->needs_rb_array = true; ctx->needs_poly = true; }
+            if (rk == SPINEL_TYPE_RB_HASH) { ctx->needs_rb_hash = true; ctx->needs_poly = true; }
+            if (rk == SPINEL_TYPE_STR_ARRAY) ctx->needs_str_split = true;
+            if (rk == SPINEL_TYPE_SP_STRING) ctx->needs_sp_string = true;
+            if (rk == SPINEL_TYPE_POLY) ctx->needs_poly = true;
+            for (int pi = 0; pi < m->param_count; pi++) {
+                spinel_type_t pk = m->params[pi].type.kind;
+                if (pk == SPINEL_TYPE_HASH) ctx->needs_hash = true;
+                if (pk == SPINEL_TYPE_RB_ARRAY) { ctx->needs_rb_array = true; ctx->needs_poly = true; }
+                if (pk == SPINEL_TYPE_POLY) ctx->needs_poly = true;
+            }
+        }
+    }
+
     /* Detect needs_sp_string: any SP_STRING-typed variable triggers mutable string runtime */
     for (int i = 0; i < ctx->var_count; i++) {
         if (ctx->vars[i].type.kind == SPINEL_TYPE_SP_STRING) {
