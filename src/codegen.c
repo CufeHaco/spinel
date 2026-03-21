@@ -428,6 +428,112 @@ static void analyze_ivars_from_init(codegen_ctx_t *ctx, class_info_t *cls,
     }
 }
 
+/* Recursively scan an AST subtree for @ivar write nodes and register them.
+ * This catches ivars assigned in non-initialize methods (e.g., Racc runtime). */
+static void scan_ivars_deep(codegen_ctx_t *ctx, class_info_t *cls, pm_node_t *node) {
+    if (!node) return;
+    switch (PM_NODE_TYPE(node)) {
+    case PM_INSTANCE_VARIABLE_WRITE_NODE: {
+        pm_instance_variable_write_node_t *iw =
+            (pm_instance_variable_write_node_t *)node;
+        char *ivname = cstr(ctx, iw->name);
+        if (!find_ivar(cls, ivname + 1) && cls->ivar_count < MAX_IVARS) {
+            ivar_info_t *iv = &cls->ivars[cls->ivar_count++];
+            snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(ivname + 1));
+            iv->type = vt_prim(SPINEL_TYPE_VALUE);
+        }
+        free(ivname);
+        break;
+    }
+    case PM_INSTANCE_VARIABLE_OPERATOR_WRITE_NODE: {
+        pm_instance_variable_operator_write_node_t *iw =
+            (pm_instance_variable_operator_write_node_t *)node;
+        char *ivname = cstr(ctx, iw->name);
+        if (!find_ivar(cls, ivname + 1) && cls->ivar_count < MAX_IVARS) {
+            ivar_info_t *iv = &cls->ivars[cls->ivar_count++];
+            snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(ivname + 1));
+            iv->type = vt_prim(SPINEL_TYPE_VALUE);
+        }
+        free(ivname);
+        break;
+    }
+    case PM_STATEMENTS_NODE: {
+        pm_statements_node_t *s = (pm_statements_node_t *)node;
+        for (size_t i = 0; i < s->body.size; i++)
+            scan_ivars_deep(ctx, cls, s->body.nodes[i]);
+        break;
+    }
+    case PM_IF_NODE: {
+        pm_if_node_t *n = (pm_if_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        if (n->subsequent) scan_ivars_deep(ctx, cls, (pm_node_t *)n->subsequent);
+        break;
+    }
+    case PM_ELSE_NODE: {
+        pm_else_node_t *n = (pm_else_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_WHILE_NODE: {
+        pm_while_node_t *n = (pm_while_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_UNTIL_NODE: {
+        pm_until_node_t *n = (pm_until_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_CASE_NODE: {
+        pm_case_node_t *n = (pm_case_node_t *)node;
+        for (size_t i = 0; i < n->conditions.size; i++)
+            scan_ivars_deep(ctx, cls, n->conditions.nodes[i]);
+        if (n->else_clause) scan_ivars_deep(ctx, cls, (pm_node_t *)n->else_clause);
+        break;
+    }
+    case PM_WHEN_NODE: {
+        pm_when_node_t *n = (pm_when_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_BEGIN_NODE: {
+        pm_begin_node_t *n = (pm_begin_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        if (n->rescue_clause) scan_ivars_deep(ctx, cls, (pm_node_t *)n->rescue_clause);
+        if (n->ensure_clause) scan_ivars_deep(ctx, cls, (pm_node_t *)n->ensure_clause);
+        break;
+    }
+    case PM_RESCUE_NODE: {
+        pm_rescue_node_t *n = (pm_rescue_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        if (n->subsequent) scan_ivars_deep(ctx, cls, (pm_node_t *)n->subsequent);
+        break;
+    }
+    case PM_ENSURE_NODE: {
+        pm_ensure_node_t *n = (pm_ensure_node_t *)node;
+        if (n->statements) scan_ivars_deep(ctx, cls, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_BLOCK_NODE: {
+        pm_block_node_t *b = (pm_block_node_t *)node;
+        if (b->body) scan_ivars_deep(ctx, cls, (pm_node_t *)b->body);
+        break;
+    }
+    case PM_CALL_NODE: {
+        pm_call_node_t *c = (pm_call_node_t *)node;
+        if (c->block) scan_ivars_deep(ctx, cls, (pm_node_t *)c->block);
+        break;
+    }
+    case PM_LOCAL_VARIABLE_WRITE_NODE: {
+        pm_local_variable_write_node_t *n = (pm_local_variable_write_node_t *)node;
+        scan_ivars_deep(ctx, cls, n->value);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node);
 
 static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
@@ -715,6 +821,13 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                 }
             }
         }
+    }
+
+    /* Scan ALL method bodies for @ivar assignments (catches ivars set outside
+     * initialize, e.g., Racc runtime's _racc_init_sysvars). */
+    for (int mi = 0; mi < cls->method_count; mi++) {
+        if (cls->methods[mi].body_node)
+            scan_ivars_deep(ctx, cls, cls->methods[mi].body_node);
     }
 
     /* Heuristic: classes with only float/int ivars and <= 4 fields are value types */
@@ -1434,6 +1547,14 @@ static bool has_exception_nodes(codegen_ctx_t *ctx, pm_node_t *node) {
         pm_while_node_t *n = (pm_while_node_t *)node;
         return n->statements ? has_exception_nodes(ctx, (pm_node_t *)n->statements) : false;
     }
+    case PM_CLASS_NODE: {
+        pm_class_node_t *cn = (pm_class_node_t *)node;
+        return cn->body ? has_exception_nodes(ctx, (pm_node_t *)cn->body) : false;
+    }
+    case PM_MODULE_NODE: {
+        pm_module_node_t *mn = (pm_module_node_t *)node;
+        return mn->body ? has_exception_nodes(ctx, (pm_node_t *)mn->body) : false;
+    }
     default:
         return false;
     }
@@ -1508,6 +1629,14 @@ static bool has_split_calls(codegen_ctx_t *ctx, pm_node_t *node) {
             if (all_str) return true;
         }
         return false;
+    }
+    case PM_CLASS_NODE: {
+        pm_class_node_t *cn = (pm_class_node_t *)node;
+        return cn->body ? has_split_calls(ctx, (pm_node_t *)cn->body) : false;
+    }
+    case PM_MODULE_NODE: {
+        pm_module_node_t *mn = (pm_module_node_t *)node;
+        return mn->body ? has_split_calls(ctx, (pm_node_t *)mn->body) : false;
     }
     default:
         return false;
@@ -1595,6 +1724,87 @@ static void collect_regexp_patterns(codegen_ctx_t *ctx, pm_node_t *node) {
             ctx->regexp_counter++;
         }
         ctx->needs_regexp = true;
+        break;
+    }
+    case PM_CLASS_NODE: {
+        pm_class_node_t *cn = (pm_class_node_t *)node;
+        if (cn->body) collect_regexp_patterns(ctx, (pm_node_t *)cn->body);
+        break;
+    }
+    case PM_MODULE_NODE: {
+        pm_module_node_t *mn = (pm_module_node_t *)node;
+        if (mn->body) collect_regexp_patterns(ctx, (pm_node_t *)mn->body);
+        break;
+    }
+    case PM_CASE_NODE: {
+        pm_case_node_t *cn = (pm_case_node_t *)node;
+        if (cn->predicate) collect_regexp_patterns(ctx, cn->predicate);
+        for (size_t i = 0; i < cn->conditions.size; i++)
+            collect_regexp_patterns(ctx, cn->conditions.nodes[i]);
+        if (cn->else_clause) collect_regexp_patterns(ctx, (pm_node_t *)cn->else_clause);
+        break;
+    }
+    case PM_WHEN_NODE: {
+        pm_when_node_t *wn = (pm_when_node_t *)node;
+        for (size_t i = 0; i < wn->conditions.size; i++)
+            collect_regexp_patterns(ctx, wn->conditions.nodes[i]);
+        if (wn->statements) collect_regexp_patterns(ctx, (pm_node_t *)wn->statements);
+        break;
+    }
+    case PM_UNTIL_NODE: {
+        pm_until_node_t *n = (pm_until_node_t *)node;
+        if (n->predicate) collect_regexp_patterns(ctx, n->predicate);
+        if (n->statements) collect_regexp_patterns(ctx, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_UNLESS_NODE: {
+        pm_unless_node_t *n = (pm_unless_node_t *)node;
+        if (n->predicate) collect_regexp_patterns(ctx, n->predicate);
+        if (n->statements) collect_regexp_patterns(ctx, (pm_node_t *)n->statements);
+        if (n->else_clause) collect_regexp_patterns(ctx, (pm_node_t *)n->else_clause);
+        break;
+    }
+    case PM_BEGIN_NODE: {
+        pm_begin_node_t *n = (pm_begin_node_t *)node;
+        if (n->statements) collect_regexp_patterns(ctx, (pm_node_t *)n->statements);
+        if (n->rescue_clause) collect_regexp_patterns(ctx, (pm_node_t *)n->rescue_clause);
+        if (n->ensure_clause) collect_regexp_patterns(ctx, (pm_node_t *)n->ensure_clause);
+        break;
+    }
+    case PM_RESCUE_NODE: {
+        pm_rescue_node_t *n = (pm_rescue_node_t *)node;
+        if (n->statements) collect_regexp_patterns(ctx, (pm_node_t *)n->statements);
+        if (n->subsequent) collect_regexp_patterns(ctx, (pm_node_t *)n->subsequent);
+        break;
+    }
+    case PM_ENSURE_NODE: {
+        pm_ensure_node_t *n = (pm_ensure_node_t *)node;
+        if (n->statements) collect_regexp_patterns(ctx, (pm_node_t *)n->statements);
+        break;
+    }
+    case PM_CONSTANT_WRITE_NODE: {
+        pm_constant_write_node_t *n = (pm_constant_write_node_t *)node;
+        collect_regexp_patterns(ctx, n->value);
+        break;
+    }
+    case PM_LOCAL_VARIABLE_OPERATOR_WRITE_NODE: {
+        pm_local_variable_operator_write_node_t *n =
+            (pm_local_variable_operator_write_node_t *)node;
+        collect_regexp_patterns(ctx, n->value);
+        break;
+    }
+    case PM_INSTANCE_VARIABLE_WRITE_NODE: {
+        pm_instance_variable_write_node_t *n =
+            (pm_instance_variable_write_node_t *)node;
+        collect_regexp_patterns(ctx, n->value);
+        break;
+    }
+    case PM_RETURN_NODE: {
+        pm_return_node_t *n = (pm_return_node_t *)node;
+        if (n->arguments) {
+            for (size_t i = 0; i < n->arguments->arguments.size; i++)
+                collect_regexp_patterns(ctx, n->arguments->arguments.nodes[i]);
+        }
         break;
     }
     default:
@@ -1925,6 +2135,15 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
 
     /* Detect regexp usage and collect patterns (must be before emit_header) */
     collect_regexp_patterns(ctx, root);
+
+    /* Also scan all required files for exceptions, splits, and regexps */
+    for (int ri = 0; ri < ctx->required_file_count; ri++) {
+        pm_node_t *rroot = (pm_node_t *)ctx->required_files[ri].root;
+        if (!rroot) continue;
+        if (!ctx->needs_exc) ctx->needs_exc = has_exception_nodes(ctx, rroot);
+        if (!ctx->needs_str_split) ctx->needs_str_split = has_split_calls(ctx, rroot);
+        collect_regexp_patterns(ctx, rroot);
+    }
 
     /* Pass 1: Analyze classes, modules, functions */
     class_analysis_pass(ctx, root);

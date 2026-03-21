@@ -221,12 +221,24 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
         const char *field = ivname + 1;  /* skip @ */
         char *op = cstr(ctx, n->binary_operator);
         char *val = codegen_expr(ctx, n->value);
-        if (ctx->current_module)
-            emit(ctx, "sp_%s_%s %s= %s;\n", ctx->current_module->name, field, op, val);
-        else if (ctx->current_class && ctx->current_class->is_value_type)
-            emit(ctx, "self.%s %s= %s;\n", field, op, val);
-        else if (ctx->current_class)
-            emit(ctx, "self->%s %s= %s;\n", field, op, val);
+        vtype_t vt = infer_type(ctx, (pm_node_t *)n);
+        if (strcmp(op, "+") == 0 && (vt.kind == SPINEL_TYPE_STRING || vt.kind == SPINEL_TYPE_SP_STRING)) {
+            /* String += → sp_str_concat */
+            if (ctx->current_module)
+                emit(ctx, "sp_%s_%s = sp_str_concat(sp_%s_%s, %s);\n",
+                     ctx->current_module->name, field, ctx->current_module->name, field, val);
+            else if (ctx->current_class && ctx->current_class->is_value_type)
+                emit(ctx, "self.%s = sp_str_concat(self.%s, %s);\n", field, field, val);
+            else if (ctx->current_class)
+                emit(ctx, "self->%s = sp_str_concat(self->%s, %s);\n", field, field, val);
+        } else {
+            if (ctx->current_module)
+                emit(ctx, "sp_%s_%s %s= %s;\n", ctx->current_module->name, field, op, val);
+            else if (ctx->current_class && ctx->current_class->is_value_type)
+                emit(ctx, "self.%s %s= %s;\n", field, op, val);
+            else if (ctx->current_class)
+                emit(ctx, "self->%s %s= %s;\n", field, op, val);
+        }
         free(ivname); free(op); free(val);
         break;
     }

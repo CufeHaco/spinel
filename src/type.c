@@ -1043,6 +1043,28 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         return infer_type(ctx, rm->expression);
     }
 
+    case PM_LOCAL_VARIABLE_OPERATOR_WRITE_NODE: {
+        pm_local_variable_operator_write_node_t *n =
+            (pm_local_variable_operator_write_node_t *)node;
+        char *name = cstr(ctx, n->name);
+        var_entry_t *v = var_lookup(ctx, name);
+        vtype_t t = v ? v->type : infer_type(ctx, n->value);
+        free(name);
+        return t;
+    }
+
+    case PM_INSTANCE_VARIABLE_OPERATOR_WRITE_NODE: {
+        pm_instance_variable_operator_write_node_t *n =
+            (pm_instance_variable_operator_write_node_t *)node;
+        char *ivname = cstr(ctx, n->name);
+        if (ctx->current_class) {
+            ivar_info_t *iv = find_ivar(ctx->current_class, ivname + 1);
+            if (iv) { free(ivname); return iv->type; }
+        }
+        free(ivname);
+        return infer_type(ctx, n->value);
+    }
+
     default:
         return vt_prim(SPINEL_TYPE_VALUE);
     }
