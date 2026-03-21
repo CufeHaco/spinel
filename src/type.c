@@ -829,6 +829,23 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         else if (strcmp(method, "__method__") == 0)
             result = vt_prim(SPINEL_TYPE_STRING);
 
+        /* Fallback: if result is still VALUE and a receiver-less call has a block,
+         * try inferring from block body's last expression.
+         * This handles methods like report_duration { ... @grammar }
+         * and other block-passing methods that return the block's value.
+         * Only for non-lambda mode and receiver-less calls to avoid
+         * interfering with lambda call inference. */
+        if (result.kind == SPINEL_TYPE_VALUE && !ctx->lambda_mode &&
+            !call->receiver && call->block &&
+            PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+            pm_block_node_t *blk = (pm_block_node_t *)call->block;
+            if (blk->body) {
+                vtype_t bt = infer_type(ctx, blk->body);
+                if (bt.kind != SPINEL_TYPE_VALUE && bt.kind != SPINEL_TYPE_UNKNOWN)
+                    result = bt;
+            }
+        }
+
         free(method);
         return result;
     }
@@ -1406,6 +1423,41 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                         iv->type = vt;
                 }
                 free(ivname_full);
+            }
+
+            /* Heuristic: resolve untyped ivars whose name matches a known class.
+             * Common Ruby convention: @grammar → Grammar, @context → Context, etc.
+             * Also handles @rule_counter → Counter (try stripping underscored prefix). */
+            for (int j = 0; j < cls->ivar_count; j++) {
+                if (cls->ivars[j].type.kind != SPINEL_TYPE_VALUE) continue;
+                const char *ivn = cls->ivars[j].name;
+                /* Try capitalizing the ivar name: grammar → Grammar */
+                char capitalized[64];
+                snprintf(capitalized, sizeof(capitalized), "%s", ivn);
+                if (capitalized[0] >= 'a' && capitalized[0] <= 'z')
+                    capitalized[0] -= ('a' - 'A');
+                /* Convert snake_case to CamelCase */
+                char camel[64];
+                int ci2 = 0;
+                bool next_upper = true;
+                for (int k = 0; ivn[k] && ci2 < 62; k++) {
+                    if (ivn[k] == '_') {
+                        next_upper = true;
+                    } else {
+                        if (next_upper && ivn[k] >= 'a' && ivn[k] <= 'z')
+                            camel[ci2++] = ivn[k] - ('a' - 'A');
+                        else
+                            camel[ci2++] = ivn[k];
+                        next_upper = false;
+                    }
+                }
+                camel[ci2] = '\0';
+                /* Try CamelCase first, then simple capitalized */
+                class_info_t *matched = find_class(ctx, camel);
+                if (!matched) matched = find_class(ctx, capitalized);
+                if (matched && matched != cls) {
+                    cls->ivars[j].type = vt_obj(matched->name);
+                }
             }
 
             /* Determine value_type based on ivars */
@@ -2133,6 +2185,198 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                     }
                 }
             }
+        }
+
+        /* Infer constructor arg types and method param types from call sites
+         * within class method bodies.  This handles patterns like:
+         *   class Command
+         *     def run(argv)
+         *       grammar = Grammar.new(text)   # → propagate arg types to Grammar#initialize params
+         *       grammar.rules.each { ... }     # → needs Grammar ivars resolved
+         *     end
+         *   end
+         */
+        for (int ci2 = 0; ci2 < ctx->class_count; ci2++) {
+            class_info_t *cls2 = &ctx->classes[ci2];
+            pm_parser_t *saved_cls_p = ctx->parser;
+            if (cls2->origin_parser) ctx->parser = cls2->origin_parser;
+            for (int mi2 = 0; mi2 < cls2->method_count; mi2++) {
+                method_info_t *m2 = &cls2->methods[mi2];
+                if (!m2->body_node || m2->is_getter || m2->is_setter) continue;
+                if (strcmp(m2->name, "initialize") == 0) continue;
+
+                /* Set up method params in var table for type inference */
+                int sv = ctx->var_count;
+                class_info_t *saved_cls2 = ctx->current_class;
+                ctx->current_class = cls2;
+                for (int pi = 0; pi < m2->param_count; pi++)
+                    var_declare(ctx, m2->params[pi].name, m2->params[pi].type, false);
+                /* Register self ivars so method body inference can see them */
+                for (int ii = 0; ii < cls2->ivar_count; ii++) {
+                    char self_name[128];
+                    snprintf(self_name, sizeof(self_name), "@%s", cls2->ivars[ii].name);
+                    (void)self_name; /* ivars handled via current_class */
+                }
+                infer_pass(ctx, m2->body_node);
+
+                /* Stack-based scan of method body for constructor and method calls */
+                pm_node_t *mstack[512];
+                int msp = 0;
+                mstack[msp++] = m2->body_node;
+                while (msp > 0) {
+                    pm_node_t *cur = mstack[--msp];
+                    if (!cur) continue;
+                    if (PM_NODE_TYPE(cur) == PM_CALL_NODE) {
+                        pm_call_node_t *call = (pm_call_node_t *)cur;
+                        char *mname = cstr(ctx, call->name);
+
+                        /* Constructor calls: ClassName.new(args) */
+                        if (strcmp(mname, "new") == 0 && call->receiver && call->arguments) {
+                            pm_constant_read_node_t *cr = NULL;
+                            char *cname = NULL;
+                            if (PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE) {
+                                cr = (pm_constant_read_node_t *)call->receiver;
+                                cname = cstr(ctx, cr->name);
+                            } else if (PM_NODE_TYPE(call->receiver) == PM_CONSTANT_PATH_NODE) {
+                                pm_constant_path_node_t *cp = (pm_constant_path_node_t *)call->receiver;
+                                cname = cstr(ctx, cp->name);
+                            }
+                            if (cname) {
+                                class_info_t *target_cls = find_class(ctx, cname);
+                                method_info_t *init = target_cls ? find_method(target_cls, "initialize") : NULL;
+                                if (target_cls && !init && target_cls->superclass[0]) {
+                                    class_info_t *parent = find_class(ctx, target_cls->superclass);
+                                    init = parent ? find_method(parent, "initialize") : NULL;
+                                }
+                                if (init) {
+                                    bool kw_init = init->param_count > 0 && init->params[0].is_keyword;
+                                    if (kw_init && call->arguments->arguments.size == 1 &&
+                                        PM_NODE_TYPE(call->arguments->arguments.nodes[0]) == PM_KEYWORD_HASH_NODE) {
+                                        pm_keyword_hash_node_t *kwh = (pm_keyword_hash_node_t *)call->arguments->arguments.nodes[0];
+                                        for (int pi = 0; pi < init->param_count; pi++) {
+                                            for (size_t ki = 0; ki < kwh->elements.size; ki++) {
+                                                if (PM_NODE_TYPE(kwh->elements.nodes[ki]) != PM_ASSOC_NODE) continue;
+                                                pm_assoc_node_t *assoc = (pm_assoc_node_t *)kwh->elements.nodes[ki];
+                                                if (PM_NODE_TYPE(assoc->key) == PM_SYMBOL_NODE) {
+                                                    pm_symbol_node_t *ksym = (pm_symbol_node_t *)assoc->key;
+                                                    const uint8_t *ksrc = pm_string_source(&ksym->unescaped);
+                                                    size_t klen = pm_string_length(&ksym->unescaped);
+                                                    char kname[64];
+                                                    snprintf(kname, sizeof(kname), "%.*s", (int)klen, ksrc);
+                                                    if (strcmp(kname, init->params[pi].name) == 0) {
+                                                        vtype_t at = infer_type(ctx, assoc->value);
+                                                        if (at.kind != SPINEL_TYPE_VALUE && at.kind != SPINEL_TYPE_UNKNOWN) {
+                                                            if (init->params[pi].type.kind == SPINEL_TYPE_VALUE)
+                                                                init->params[pi].type = at;
+                                                            ivar_info_t *iv = find_ivar(target_cls, init->params[pi].name);
+                                                            if (iv && iv->type.kind == SPINEL_TYPE_VALUE) iv->type = at;
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        for (int ai = 0; ai < (int)call->arguments->arguments.size &&
+                                             ai < init->param_count; ai++) {
+                                            if (init->params[ai].type.kind == SPINEL_TYPE_VALUE) {
+                                                vtype_t at = infer_type(ctx, call->arguments->arguments.nodes[ai]);
+                                                if (at.kind != SPINEL_TYPE_VALUE && at.kind != SPINEL_TYPE_UNKNOWN)
+                                                    init->params[ai].type = at;
+                                            }
+                                        }
+                                    }
+                                }
+                                free(cname);
+                            }
+                        }
+
+                        /* Method calls on typed receivers: recv.method(args) → propagate arg types */
+                        if (call->receiver && call->arguments) {
+                            vtype_t recv_t = infer_type(ctx, call->receiver);
+                            if (recv_t.kind == SPINEL_TYPE_OBJECT) {
+                                class_info_t *rcls = find_class(ctx, recv_t.klass);
+                                if (rcls) {
+                                    method_info_t *target = find_method_inherited(ctx, rcls, mname, NULL);
+                                    if (target) {
+                                        for (int pi = 0; pi < target->param_count &&
+                                             pi < (int)call->arguments->arguments.size; pi++) {
+                                            if (target->params[pi].type.kind == SPINEL_TYPE_VALUE) {
+                                                vtype_t at = infer_type(ctx, call->arguments->arguments.nodes[pi]);
+                                                if (at.kind != SPINEL_TYPE_VALUE && at.kind != SPINEL_TYPE_UNKNOWN)
+                                                    target->params[pi].type = at;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        free(mname);
+                        /* Push children for scanning */
+                        if (call->receiver && msp < 510) mstack[msp++] = call->receiver;
+                        if (call->arguments) {
+                            for (size_t ai = 0; ai < call->arguments->arguments.size && msp < 510; ai++)
+                                mstack[msp++] = call->arguments->arguments.nodes[ai];
+                        }
+                        if (call->block && PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+                            pm_block_node_t *blk = (pm_block_node_t *)call->block;
+                            if (blk->body && msp < 510) mstack[msp++] = (pm_node_t *)blk->body;
+                        }
+                    }
+                    /* Recurse into common statement types */
+                    if (PM_NODE_TYPE(cur) == PM_STATEMENTS_NODE) {
+                        pm_statements_node_t *ss = (pm_statements_node_t *)cur;
+                        for (size_t si = 0; si < ss->body.size && msp < 510; si++)
+                            mstack[msp++] = ss->body.nodes[si];
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_LOCAL_VARIABLE_WRITE_NODE) {
+                        pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)cur;
+                        if (msp < 510) mstack[msp++] = lw->value;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_IF_NODE) {
+                        pm_if_node_t *ifn = (pm_if_node_t *)cur;
+                        if (ifn->predicate && msp < 510) mstack[msp++] = ifn->predicate;
+                        if (ifn->statements && msp < 510) mstack[msp++] = (pm_node_t *)ifn->statements;
+                        if (ifn->subsequent && msp < 510) mstack[msp++] = (pm_node_t *)ifn->subsequent;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_ELSE_NODE) {
+                        pm_else_node_t *en = (pm_else_node_t *)cur;
+                        if (en->statements && msp < 510) mstack[msp++] = (pm_node_t *)en->statements;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_WHILE_NODE) {
+                        pm_while_node_t *wn = (pm_while_node_t *)cur;
+                        if (wn->predicate && msp < 510) mstack[msp++] = wn->predicate;
+                        if (wn->statements && msp < 510) mstack[msp++] = (pm_node_t *)wn->statements;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_UNLESS_NODE) {
+                        pm_unless_node_t *un = (pm_unless_node_t *)cur;
+                        if (un->predicate && msp < 510) mstack[msp++] = un->predicate;
+                        if (un->statements && msp < 510) mstack[msp++] = (pm_node_t *)un->statements;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_BEGIN_NODE) {
+                        pm_begin_node_t *bn = (pm_begin_node_t *)cur;
+                        if (bn->statements && msp < 510) mstack[msp++] = (pm_node_t *)bn->statements;
+                        if (bn->rescue_clause && bn->rescue_clause->statements && msp < 510)
+                            mstack[msp++] = (pm_node_t *)bn->rescue_clause->statements;
+                        if (bn->ensure_clause && bn->ensure_clause->statements && msp < 510)
+                            mstack[msp++] = (pm_node_t *)bn->ensure_clause->statements;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_RESCUE_NODE) {
+                        pm_rescue_node_t *rn = (pm_rescue_node_t *)cur;
+                        if (rn->statements && msp < 510) mstack[msp++] = (pm_node_t *)rn->statements;
+                        if (rn->subsequent && msp < 510) mstack[msp++] = (pm_node_t *)rn->subsequent;
+                    }
+                    if (PM_NODE_TYPE(cur) == PM_LOCAL_VARIABLE_OPERATOR_WRITE_NODE) {
+                        pm_local_variable_operator_write_node_t *ow = (pm_local_variable_operator_write_node_t *)cur;
+                        if (msp < 510) mstack[msp++] = ow->value;
+                    }
+                }
+
+                ctx->var_count = sv;
+                ctx->current_class = saved_cls2;
+            }
+            ctx->parser = saved_cls_p;
         }
 
         /* Propagate init param types through super() calls:

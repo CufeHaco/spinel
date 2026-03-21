@@ -328,7 +328,16 @@ const char *sanitize_method(const char *name) {
 
 static void analyze_method(codegen_ctx_t *ctx, class_info_t *cls,
                            pm_def_node_t *def) {
+    if (cls->method_count >= MAX_METHODS) return;
+    /* Skip if method already registered (class reopening) */
+    {
+        char *dn = cstr(ctx, def->name);
+        method_info_t *existing = find_method(cls, dn);
+        free(dn);
+        if (existing) return;
+    }
     method_info_t *m = &cls->methods[cls->method_count++];
+    memset(m, 0, sizeof(*m));
     char *name = cstr(ctx, def->name);
     snprintf(m->name, sizeof(m->name), "%s", name);
     free(name);
@@ -418,20 +427,26 @@ static void analyze_ivars_from_init(codegen_ctx_t *ctx, class_info_t *cls,
     }
 }
 
+static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node);
+
 static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
-    /* Dedup: skip if class already registered */
+    /* Check if class already registered (reopened class) — merge if so */
+    class_info_t *cls = NULL;
     if (PM_NODE_TYPE(node->constant_path) == PM_CONSTANT_READ_NODE) {
         pm_constant_read_node_t *cr = (pm_constant_read_node_t *)node->constant_path;
         char *dn = cstr(ctx, cr->name);
-        if (find_class(ctx, dn)) { free(dn); return; }
+        cls = find_class(ctx, dn);
         free(dn);
     }
-    if (ctx->class_count >= MAX_CLASSES) return;
-
-    class_info_t *cls = &ctx->classes[ctx->class_count++];
-    memset(cls, 0, sizeof(*cls));
-    cls->class_node = (pm_node_t *)node;
-    cls->origin_parser = ctx->parser;
+    if (!cls) {
+        if (ctx->class_count >= MAX_CLASSES) return;
+        cls = &ctx->classes[ctx->class_count++];
+        memset(cls, 0, sizeof(*cls));
+        cls->origin_parser = ctx->parser;
+    }
+    /* Update class_node to the most recent definition with a body */
+    if (node->body)
+        cls->class_node = (pm_node_t *)node;
 
     /* Get class name from constant_path */
     if (PM_NODE_TYPE(node->constant_path) == PM_CONSTANT_READ_NODE) {
@@ -528,7 +543,9 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
 
             /* def self.foo → class method */
             if (def->receiver && PM_NODE_TYPE(def->receiver) == PM_SELF_NODE) {
+                if (cls->method_count >= MAX_METHODS) continue;
                 method_info_t *m = &cls->methods[cls->method_count++];
+                memset(m, 0, sizeof(*m));
                 char *name = cstr(ctx, def->name);
                 snprintf(m->name, sizeof(m->name), "%s", name);
                 free(name);
@@ -559,9 +576,12 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
 
             analyze_method(ctx, cls, def);
 
-            /* Extract ivars from initialize */
+            /* Extract ivars from initialize — also update origin_parser
+             * to the parser that owns the initialize method, since this is
+             * the "main" class definition (important for reopened classes). */
             char *mname = cstr(ctx, def->name);
             if (strcmp(mname, "initialize") == 0) {
+                cls->origin_parser = ctx->parser;
                 analyze_ivars_from_init(ctx, cls, def->body ? (pm_node_t *)def->body : NULL);
             }
             free(mname);
@@ -590,9 +610,11 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                         iv->type = vt_prim(SPINEL_TYPE_VALUE);
                     }
 
-                    /* Generate getter */
-                    if (is_accessor || is_reader) {
+                    /* Generate getter (skip if already registered) */
+                    if ((is_accessor || is_reader) &&
+                        !find_method(cls, sym_name) && cls->method_count < MAX_METHODS) {
                         method_info_t *m = &cls->methods[cls->method_count++];
+                        memset(m, 0, sizeof(*m));
                         snprintf(m->name, sizeof(m->name), "%s", sym_name);
                         m->body_node = NULL;
                         m->params_node = NULL;
@@ -604,8 +626,12 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                         m->return_type = vt_prim(SPINEL_TYPE_VALUE);
                     }
 
-                    /* Generate setter */
-                    if (is_accessor || is_writer) {
+                    /* Generate setter (skip if already registered) */
+                    {
+                    char setter_name[64];
+                    snprintf(setter_name, sizeof(setter_name), "%.62s=", sym_name);
+                    if ((is_accessor || is_writer) &&
+                        !find_method(cls, setter_name) && cls->method_count < MAX_METHODS) {
                         method_info_t *m = &cls->methods[cls->method_count++];
                         snprintf(m->name, sizeof(m->name), "%.62s=", sym_name);
                         m->body_node = NULL;
@@ -618,6 +644,7 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                         m->is_class_method = false;
                         snprintf(m->accessor_ivar, sizeof(m->accessor_ivar), "%s", sym_name);
                         m->return_type = vt_prim(SPINEL_TYPE_VALUE);
+                    }
                     }
                 }
             }
