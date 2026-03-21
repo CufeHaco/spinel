@@ -258,6 +258,12 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         return infer_type(ctx, n->value);
     }
 
+    case PM_INSTANCE_VARIABLE_OR_WRITE_NODE: {
+        /* @x ||= expr — type is the type of the value expression */
+        pm_instance_variable_or_write_node_t *n = (pm_instance_variable_or_write_node_t *)node;
+        return infer_type(ctx, n->value);
+    }
+
     case PM_CALL_NODE: {
         pm_call_node_t *call = (pm_call_node_t *)node;
         char *method = cstr(ctx, call->name);
@@ -434,6 +440,7 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                     strcmp(method, "compact") == 0 || strcmp(method, "flatten") == 0 ||
                     strcmp(method, "reverse") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "unshift") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                if (strcmp(method, "push") == 0 || strcmp(method, "<<") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "include?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
                 if (strcmp(method, "each") == 0 || strcmp(method, "each_with_index") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "join") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }

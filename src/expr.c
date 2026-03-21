@@ -1370,7 +1370,8 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("sp_IntArray_join(%s, %s)", recv, arg);
                     free(arg);
                 }
-                else if (strcmp(method, "push") == 0 && call->arguments &&
+                else if ((strcmp(method, "push") == 0 || strcmp(method, "<<") == 0) &&
+                         call->arguments &&
                          call->arguments->arguments.size == 1) {
                     char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                     r = sfmt("sp_IntArray_push(%s, %s)", recv, arg);
@@ -3677,6 +3678,18 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             return sfmt("_sl_%d", tmp);
         }
 
+        /* report_duration(:label) { block } → just execute the block, return block result */
+        if (!call->receiver && strcmp(method, "report_duration") == 0 &&
+            call->block && PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+            pm_block_node_t *blk = (pm_block_node_t *)call->block;
+            if (blk->body) {
+                free(method);
+                return codegen_expr(ctx, blk->body);
+            }
+            free(method);
+            return xstrdup("0");
+        }
+
         /* Fallback — unsupported method call */
         {
             /* Get receiver type description for warning */
@@ -4225,6 +4238,36 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
 
     case PM_KEYWORD_HASH_NODE:
         return xstrdup("0 /* kwargs */");
+
+    case PM_RETURN_NODE: {
+        pm_return_node_t *ret = (pm_return_node_t *)node;
+        if (ret->arguments && ret->arguments->arguments.size > 0) {
+            char *val = codegen_expr(ctx, ret->arguments->arguments.nodes[0]);
+            emit(ctx, "return %s;\n", val);
+            free(val);
+        } else {
+            emit(ctx, "return 0;\n");
+        }
+        return xstrdup("0"); /* unreachable but needed for expression context */
+    }
+
+    case PM_INSTANCE_VARIABLE_OR_WRITE_NODE: {
+        pm_instance_variable_or_write_node_t *n = (pm_instance_variable_or_write_node_t *)node;
+        char *ivname = cstr(ctx, n->name);
+        const char *field = ivname + 1;
+        char *val = codegen_expr(ctx, n->value);
+        char *r;
+        if (ctx->current_class && ctx->current_class->is_value_type)
+            r = sfmt("(self.%s ? self.%s : (self.%s = %s))", field, field, field, val);
+        else if (ctx->current_class)
+            r = sfmt("(self->%s ? self->%s : (self->%s = %s))", field, field, field, val);
+        else if (ctx->current_module)
+            r = sfmt("(sp_%s_%s ? sp_%s_%s : (sp_%s_%s = %s))", ctx->current_module->name, field, ctx->current_module->name, field, ctx->current_module->name, field, val);
+        else
+            r = sfmt("0");
+        free(ivname); free(val);
+        return r;
+    }
 
     default:
         fprintf(stderr, "spinel: warning: unsupported expression node type %d\n", PM_NODE_TYPE(node));

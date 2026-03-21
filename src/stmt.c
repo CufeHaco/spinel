@@ -189,6 +189,21 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
         break;
     }
 
+    case PM_INSTANCE_VARIABLE_OR_WRITE_NODE: {
+        pm_instance_variable_or_write_node_t *n = (pm_instance_variable_or_write_node_t *)node;
+        char *ivname = cstr(ctx, n->name);
+        const char *field = ivname + 1;
+        char *val = codegen_expr(ctx, n->value);
+        if (ctx->current_class && ctx->current_class->is_value_type)
+            emit(ctx, "if (!self.%s) self.%s = %s;\n", field, field, val);
+        else if (ctx->current_class)
+            emit(ctx, "if (!self->%s) self->%s = %s;\n", field, field, val);
+        else if (ctx->current_module)
+            emit(ctx, "if (!sp_%s_%s) sp_%s_%s = %s;\n", ctx->current_module->name, field, ctx->current_module->name, field, val);
+        free(ivname); free(val);
+        break;
+    }
+
     case PM_WHILE_NODE: {
         pm_while_node_t *n = (pm_while_node_t *)node;
         char *cond = codegen_expr(ctx, n->predicate);
@@ -800,6 +815,15 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
             ctx->for_depth--;
             ctx->indent--;
             emit(ctx, "}\n");
+            free(method);
+            break;
+        }
+
+        /* report_duration(:label) { block } → just execute the block body */
+        if (!call->receiver && strcmp(method, "report_duration") == 0 &&
+            call->block && PM_NODE_TYPE(call->block) == PM_BLOCK_NODE) {
+            pm_block_node_t *blk = (pm_block_node_t *)call->block;
+            if (blk->body) codegen_stmts(ctx, (pm_node_t *)blk->body);
             free(method);
             break;
         }
@@ -1663,6 +1687,14 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
                     free(vn); free(cn); free(arg); free(method);
                     break;
                 }
+            }
+            if (recv_t.kind == SPINEL_TYPE_ARRAY) {
+                /* IntArray << val → sp_IntArray_push(arr, val) */
+                char *recv = codegen_expr(ctx, call->receiver);
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                emit(ctx, "sp_IntArray_push(%s, %s);\n", recv, arg);
+                free(recv); free(arg); free(method);
+                break;
             }
         }
 
