@@ -3095,7 +3095,18 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     free(re); free(method);
                     return r;
                 }
-                /* nil? is always false for non-nil values, true for nil */
+                /* nil? on pointer types → runtime NULL check */
+                if (recv_t.kind == SPINEL_TYPE_OBJECT ||
+                    recv_t.kind == SPINEL_TYPE_ARRAY ||
+                    recv_t.kind == SPINEL_TYPE_FLOAT_ARRAY ||
+                    recv_t.kind == SPINEL_TYPE_SP_STRING ||
+                    recv_t.kind == SPINEL_TYPE_HASH) {
+                    char *re = codegen_expr(ctx, call->receiver);
+                    char *r = sfmt("(%s == NULL)", re);
+                    free(re); free(method);
+                    return r;
+                }
+                /* nil? is always false for non-nil value types, true for nil */
                 if (PM_NODE_TYPE(call->receiver) == PM_NIL_NODE) {
                     free(method); return xstrdup("TRUE");
                 }
