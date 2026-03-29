@@ -129,6 +129,10 @@ class Compiler
     @needs_file_io = 0
     @needs_mutable_str = 0
     @needs_rb_value = 0
+
+    # Poly tracking: functions with params called with different types
+    @poly_funcs = "".split(",")
+    @poly_param_types = "".split(",")
   end
 
   def join_sep(arr, sep)
@@ -978,6 +982,9 @@ class Compiler
     if mname == "empty?"
       return "bool"
     end
+    if mname == "nil?"
+      return "bool"
+    end
     if mname == "has_key?"
       return "bool"
     end
@@ -1152,9 +1159,24 @@ class Compiler
       return "int_array"
     end
 
-    # Method call on object
+    # Method call on poly
     if recv >= 0
       rt = infer_type(recv)
+      if rt == "poly"
+        if mname == "nil?"
+          return "bool"
+        end
+        # Check all classes for this method and return the first matching return type
+        ci = 0
+        while ci < @cls_names.length
+          midx = cls_find_method_direct(ci, mname)
+          if midx >= 0
+            return cls_method_return(ci, mname)
+          end
+          ci = ci + 1
+        end
+        return "int"
+      end
       if is_obj_type(rt) == 1
         cname = rt[4, rt.length - 4]
         ci = find_class_idx(cname)
@@ -1263,6 +1285,9 @@ class Compiler
     if t == "str_str_hash"
       return "sp_StrStrHash *"
     end
+    if t == "poly"
+      return "sp_RbVal"
+    end
     if is_obj_type(t) == 1
       cname = t[4, t.length - 4]
       return "sp_" + cname + " *"
@@ -1288,6 +1313,9 @@ class Compiler
     end
     if t == "nil"
       return "0"
+    end
+    if t == "poly"
+      return "sp_box_nil()"
     end
     if type_is_pointer(t) == 1
       return "NULL"
@@ -2814,9 +2842,161 @@ class Compiler
     pop_scope
   end
 
+  def detect_poly_params
+    # Scan all call sites to detect functions called with different param types
+    stmts = get_body_stmts(@root_id)
+    i = 0
+    while i < stmts.length
+      detect_poly_in_node(stmts[i])
+      i = i + 1
+    end
+  end
+
+  def detect_poly_in_node(nid)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "CallNode"
+      mname = @nd_name[nid]
+      if @nd_receiver[nid] < 0
+        mi = find_method_idx(mname)
+        if mi >= 0
+          args_id = @nd_arguments[nid]
+          if args_id >= 0
+            arg_ids = get_args(args_id)
+            ptypes = @meth_param_types[mi].split(",")
+            k = 0
+            while k < arg_ids.length
+              at = infer_type(arg_ids[k])
+              if k < ptypes.length
+                ct = ptypes[k]
+                if ct != at
+                  if ct != "poly"
+                    # Types differ - mark as poly
+                    ptypes[k] = "poly"
+                    @needs_rb_value = 1
+                  end
+                end
+              end
+              k = k + 1
+            end
+            @meth_param_types[mi] = join_sep(ptypes, ",")
+          end
+        end
+      end
+    end
+    # Recurse
+    if @nd_body[nid] >= 0
+      detect_poly_in_node(@nd_body[nid])
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      detect_poly_in_node(stmts[k])
+      k = k + 1
+    end
+    if @nd_expression[nid] >= 0
+      detect_poly_in_node(@nd_expression[nid])
+    end
+    if @nd_arguments[nid] >= 0
+      detect_poly_in_node(@nd_arguments[nid])
+    end
+    args = parse_id_list(@nd_args[nid])
+    k = 0
+    while k < args.length
+      detect_poly_in_node(args[k])
+      k = k + 1
+    end
+    if @nd_predicate[nid] >= 0
+      detect_poly_in_node(@nd_predicate[nid])
+    end
+    if @nd_subsequent[nid] >= 0
+      detect_poly_in_node(@nd_subsequent[nid])
+    end
+    if @nd_else_clause[nid] >= 0
+      detect_poly_in_node(@nd_else_clause[nid])
+    end
+    if @nd_block[nid] >= 0
+      detect_poly_in_node(@nd_block[nid])
+    end
+    conds = parse_id_list(@nd_conditions[nid])
+    k = 0
+    while k < conds.length
+      detect_poly_in_node(conds[k])
+      k = k + 1
+    end
+  end
+
+  def detect_poly_locals
+    # Detect local variables assigned different types in main scope
+    stmts = get_body_stmts(@root_id)
+    local_types = "".split(",")
+    local_names = "".split(",")
+    i = 0
+    while i < stmts.length
+      sid = stmts[i]
+      if @nd_type[sid] != "DefNode"
+        if @nd_type[sid] != "ClassNode"
+          scan_poly_assigns(sid, local_names, local_types)
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  def scan_poly_assigns(nid, names, types)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "LocalVariableWriteNode"
+      lname = @nd_name[nid]
+      at = infer_type(@nd_expression[nid])
+      idx = -1
+      k = 0
+      while k < names.length
+        if names[k] == lname
+          idx = k
+        end
+        k = k + 1
+      end
+      if idx >= 0
+        if types[idx] != at
+          if types[idx] != "poly"
+            types[idx] = "poly"
+            @needs_rb_value = 1
+          end
+        end
+      else
+        names.push(lname)
+        types.push(at)
+      end
+    end
+    # Recurse
+    if @nd_body[nid] >= 0
+      scan_poly_assigns(@nd_body[nid], names, types)
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      scan_poly_assigns(stmts[k], names, types)
+      k = k + 1
+    end
+    if @nd_expression[nid] >= 0
+      scan_poly_assigns(@nd_expression[nid], names, types)
+    end
+    if @nd_subsequent[nid] >= 0
+      scan_poly_assigns(@nd_subsequent[nid], names, types)
+    end
+    if @nd_else_clause[nid] >= 0
+      scan_poly_assigns(@nd_else_clause[nid], names, types)
+    end
+  end
+
   def compile
     collect_all
     infer_main_call_types
+    detect_poly_params
+    detect_poly_locals
     # Re-infer return types after main call type fixes
     infer_all_returns
     detect_features
@@ -2853,6 +3033,9 @@ class Compiler
         emit_str_array_runtime
       end
       emit_string_helpers
+    end
+    if @needs_rb_value == 1
+      emit_rb_value_runtime
     end
     if @needs_setjmp == 1
       emit_setjmp_runtime
@@ -2997,6 +3180,37 @@ class Compiler
     emit_raw("static const char*sp_sprintf(const char*fmt,...){char*b=(char*)malloc(4096);va_list ap;va_start(ap,fmt);vsnprintf(b,4096,fmt,ap);va_end(ap);return b;}")
     emit_raw("static const char*sp_str_reverse(const char*s){size_t l=strlen(s);char*r=(char*)malloc(l+1);for(size_t i=0;i<l;i++)r[i]=s[l-1-i];r[l]=0;return r;}")
     emit_raw("static const char*sp_str_sub(const char*s,const char*pat,const char*rep){const char*f=strstr(s,pat);if(!f)return s;size_t pl=strlen(pat),rl=strlen(rep),sl=strlen(s);char*r=(char*)malloc(sl-pl+rl+1);size_t n=f-s;memcpy(r,s,n);memcpy(r+n,rep,rl);memcpy(r+n+rl,f+pl,sl-n-pl+1);return r;}")
+    emit_raw("")
+  end
+
+  def emit_rb_value_runtime
+    emit_raw("/* NaN-boxed polymorphic value */")
+    emit_raw("typedef uint64_t sp_RbValue;")
+    emit_raw("#define SP_TAG_INT  0")
+    emit_raw("#define SP_TAG_STR  1")
+    emit_raw("#define SP_TAG_FLT  2")
+    emit_raw("#define SP_TAG_BOOL 3")
+    emit_raw("#define SP_TAG_NIL  4")
+    emit_raw("#define SP_TAG_OBJ  5")
+    emit_raw("typedef struct { int tag; union { mrb_int i; const char *s; mrb_float f; mrb_bool b; void *p; int cls_id; } v; } sp_RbVal;")
+    emit_raw("static sp_RbVal sp_box_int(mrb_int v) { sp_RbVal r; r.tag = SP_TAG_INT; r.v.i = v; return r; }")
+    emit_raw("static sp_RbVal sp_box_str(const char *v) { sp_RbVal r; r.tag = SP_TAG_STR; r.v.s = v; return r; }")
+    emit_raw("static sp_RbVal sp_box_float(mrb_float v) { sp_RbVal r; r.tag = SP_TAG_FLT; r.v.f = v; return r; }")
+    emit_raw("static sp_RbVal sp_box_bool(mrb_bool v) { sp_RbVal r; r.tag = SP_TAG_BOOL; r.v.b = v; return r; }")
+    emit_raw("static sp_RbVal sp_box_nil(void) { sp_RbVal r; r.tag = SP_TAG_NIL; r.v.i = 0; return r; }")
+    emit_raw("static sp_RbVal sp_box_obj(void *p, int cls_id) { sp_RbVal r; r.tag = SP_TAG_OBJ; r.v.p = p; r.v.cls_id = cls_id; return r; }")
+    emit_raw("static void sp_poly_puts(sp_RbVal v) {")
+    emit_raw("  switch (v.tag) {")
+    emit_raw("    case SP_TAG_INT: printf(\"%lld\\n\", (long long)v.v.i); break;")
+    emit_raw("    case SP_TAG_STR: if (v.v.s) { fputs(v.v.s, stdout); if (!*v.v.s || v.v.s[strlen(v.v.s)-1] != '\\n') putchar('\\n'); } else putchar('\\n'); break;")
+    emit_raw("    case SP_TAG_FLT: printf(\"%g\\n\", v.v.f); break;")
+    emit_raw("    case SP_TAG_BOOL: puts(v.v.b ? \"true\" : \"false\"); break;")
+    emit_raw("    case SP_TAG_NIL: putchar('\\n'); break;")
+    emit_raw("    default: printf(\"%lld\\n\", (long long)v.v.i); break;")
+    emit_raw("  }")
+    emit_raw("}")
+    emit_raw("static mrb_bool sp_poly_nil_p(sp_RbVal v) { return v.tag == SP_TAG_NIL; }")
+    emit_raw("static const char *sp_poly_to_s(sp_RbVal v) { switch (v.tag) { case SP_TAG_INT: { char *b = (char*)malloc(32); snprintf(b, 32, \"%lld\", (long long)v.v.i); return b; } case SP_TAG_STR: return v.v.s ? v.v.s : \"\"; case SP_TAG_FLT: { char *b = (char*)malloc(64); snprintf(b, 64, \"%g\", v.v.f); return b; } case SP_TAG_BOOL: return v.v.b ? \"true\" : \"false\"; case SP_TAG_NIL: return \"\"; default: return \"\"; } }")
     emit_raw("")
   end
 
@@ -3840,6 +4054,23 @@ class Compiler
           names.push(lname)
           types.push(infer_type(@nd_expression[nid]))
         end
+      else
+        if not_in(lname, params) == 1
+          # Check if type changed
+          at = infer_type(@nd_expression[nid])
+          ki = 0
+          while ki < names.length
+            if names[ki] == lname
+              if types[ki] != at
+                if types[ki] != "poly"
+                  types[ki] = "poly"
+                  @needs_rb_value = 1
+                end
+              end
+            end
+            ki = ki + 1
+          end
+        end
       end
     end
     if @nd_type[nid] == "LocalVariableOperatorWriteNode"
@@ -4376,8 +4607,13 @@ class Compiler
                       fmt = fmt + "%s"
                       arg_exprs.push("(" + compile_expr(inner) + " ? \"true\" : \"false\")")
                     else
-                      fmt = fmt + "%lld"
-                      arg_exprs.push("(long long)" + compile_expr(inner))
+                      if it == "poly"
+                        fmt = fmt + "%s"
+                        arg_exprs.push("sp_poly_to_s(" + compile_expr(inner) + ")")
+                      else
+                        fmt = fmt + "%lld"
+                        arg_exprs.push("(long long)" + compile_expr(inner))
+                      end
                     end
                   end
                 end
@@ -4843,6 +5079,11 @@ class Compiler
       end
     end
 
+    # Poly method calls
+    if recv_type == "poly"
+      return compile_poly_method_call(nid, rc, mname)
+    end
+
     # Object method calls
     if is_obj_type(recv_type) == 1
       cname = recv_type[4, recv_type.length - 4]
@@ -4895,6 +5136,32 @@ class Compiler
     "0"
   end
 
+  def compile_poly_method_call(nid, rc, mname)
+    @needs_rb_value = 1
+    if mname == "nil?"
+      return "sp_poly_nil_p(" + rc + ")"
+    end
+    # For object method calls, dispatch based on cls_id
+    # Generate: switch on v.tag and cls_id
+    tmp = new_temp
+    emit("  const char *" + tmp + " = \"\";")
+    emit("  if (" + rc + ".tag == SP_TAG_OBJ) {")
+    # Dispatch to each possible class
+    i = 0
+    while i < @cls_names.length
+      cname = @cls_names[i]
+      mi = cls_find_method(@cls_names.length - 1 - i, mname)
+      # Check if this class has the method
+      midx = cls_find_method_direct(i, mname)
+      if midx >= 0
+        emit("    if (" + rc + ".v.cls_id == " + i.to_s + ") " + tmp + " = sp_" + cname + "_" + sanitize_name(mname) + "((sp_" + cname + " *)" + rc + ".v.p);")
+      end
+      i = i + 1
+    end
+    emit("  }")
+    tmp
+  end
+
   def compile_eq(nid, op)
     recv = @nd_receiver[nid]
     lt = infer_type(recv)
@@ -4941,6 +5208,32 @@ class Compiler
     "(" + lc + " " + op + " " + rc + ")"
   end
 
+  def box_expr_to_poly(nid)
+    at = infer_type(nid)
+    val = compile_expr(nid)
+    if at == "int"
+      return "sp_box_int(" + val + ")"
+    end
+    if at == "string"
+      return "sp_box_str(" + val + ")"
+    end
+    if at == "float"
+      return "sp_box_float(" + val + ")"
+    end
+    if at == "bool"
+      return "sp_box_bool(" + val + ")"
+    end
+    if at == "nil"
+      return "sp_box_nil()"
+    end
+    if is_obj_type(at) == 1
+      cname = at[4, at.length - 4]
+      ci = find_class_idx(cname)
+      return "sp_box_obj(" + val + ", " + ci.to_s + ")"
+    end
+    "sp_box_int(" + val + ")"
+  end
+
   def compile_call_args_with_defaults(nid, mi)
     args_id = @nd_arguments[nid]
     arg_ids = []
@@ -4948,6 +5241,7 @@ class Compiler
       arg_ids = get_args(args_id)
     end
     pnames = @meth_param_names[mi].split(",")
+    ptypes = @meth_param_types[mi].split(",")
     defaults = @meth_has_defaults[mi].split(",")
     result = ""
     k = 0
@@ -4956,6 +5250,14 @@ class Compiler
         result = result + ", "
       end
       if k < arg_ids.length
+        # Check if param is poly - box the value
+        if k < ptypes.length
+          if ptypes[k] == "poly"
+            result = result + box_expr_to_poly(arg_ids[k])
+            k = k + 1
+            next
+          end
+        end
         result = result + compile_expr(arg_ids[k])
       else
         # Use default value
@@ -5132,9 +5434,16 @@ class Compiler
     end
     t = @nd_type[nid]
     if t == "LocalVariableWriteNode"
+      lname = @nd_name[nid]
+      vt = find_var_type(lname)
+      if vt == "poly"
+        # Box the value
+        emit("  lv_" + lname + " = " + box_expr_to_poly(@nd_expression[nid]) + ";")
+        return
+      end
       val = compile_expr(@nd_expression[nid])
-      emit("  lv_" + @nd_name[nid] + " = " + val + ";")
-      set_var_type(@nd_name[nid], infer_type(@nd_expression[nid]))
+      emit("  lv_" + lname + " = " + val + ";")
+      set_var_type(lname, infer_type(@nd_expression[nid]))
       return
     end
     if t == "LocalVariableOperatorWriteNode"
@@ -5432,20 +5741,21 @@ class Compiler
   end
 
   def compile_case_match_stmt(nid)
-    # case/in pattern matching
-    # For now, handle type patterns (Integer, String, Float, true, false, nil)
-    # and value patterns
     pred = @nd_predicate[nid]
     pred_type = infer_type(pred)
     pred_val = compile_expr(pred)
     tmp = new_temp
-    if pred_type == "string"
-      emit("  const char *" + tmp + " = " + pred_val + ";")
+    if pred_type == "poly"
+      emit("  sp_RbVal " + tmp + " = " + pred_val + ";")
     else
-      if pred_type == "float"
-        emit("  mrb_float " + tmp + " = " + pred_val + ";")
+      if pred_type == "string"
+        emit("  const char *" + tmp + " = " + pred_val + ";")
       else
-        emit("  mrb_int " + tmp + " = " + pred_val + ";")
+        if pred_type == "float"
+          emit("  mrb_float " + tmp + " = " + pred_val + ";")
+        else
+          emit("  mrb_int " + tmp + " = " + pred_val + ";")
+        end
       end
     end
     conds = parse_id_list(@nd_conditions[nid])
@@ -5485,34 +5795,60 @@ class Compiler
     pt = @nd_type[pat_id]
     if pt == "ConstantReadNode"
       cname = @nd_name[pat_id]
+      if pred_type == "poly"
+        if cname == "Integer"
+          return tmp + ".tag == SP_TAG_INT"
+        end
+        if cname == "String"
+          return tmp + ".tag == SP_TAG_STR"
+        end
+        if cname == "Float"
+          return tmp + ".tag == SP_TAG_FLT"
+        end
+        return "0"
+      end
       if cname == "Integer"
-        return "1"  # For monomorphic int, always true
+        return "1"
       end
       if cname == "String"
-        return "1"  # For monomorphic string, always true
+        return "1"
       end
       if cname == "Float"
-        return "1"  # For monomorphic float, always true
+        return "1"
       end
       return "0"
     end
     if pt == "IntegerNode"
+      if pred_type == "poly"
+        return "(" + tmp + ".tag == SP_TAG_INT && " + tmp + ".v.i == " + @nd_value[pat_id].to_s + ")"
+      end
       return tmp + " == " + @nd_value[pat_id].to_s
     end
     if pt == "StringNode"
+      if pred_type == "poly"
+        return "(" + tmp + ".tag == SP_TAG_STR && strcmp(" + tmp + ".v.s, " + c_string_literal(@nd_content[pat_id]) + ") == 0)"
+      end
       return "strcmp(" + tmp + ", " + c_string_literal(@nd_content[pat_id]) + ") == 0"
     end
     if pt == "NilNode"
+      if pred_type == "poly"
+        return tmp + ".tag == SP_TAG_NIL"
+      end
       return tmp + " == 0"
     end
     if pt == "TrueNode"
+      if pred_type == "poly"
+        return "(" + tmp + ".tag == SP_TAG_BOOL && " + tmp + ".v.b)"
+      end
       return tmp + " != 0"
     end
     if pt == "FalseNode"
+      if pred_type == "poly"
+        return "(" + tmp + ".tag == SP_TAG_BOOL && !" + tmp + ".v.b)"
+      end
       return tmp + " == 0"
     end
     if pt == "AlternationPatternNode"
-      # true | false pattern
       left = compile_in_pattern(@nd_left[pat_id], tmp, pred_type)
       right = compile_in_pattern(@nd_right[pat_id], tmp, pred_type)
       return "(" + left + " || " + right + ")"
@@ -5931,6 +6267,12 @@ class Compiler
       aid = arg_ids[k]
       at = infer_type(aid)
       val = compile_expr(aid)
+      if at == "poly"
+        @needs_rb_value = 1
+        emit("  sp_poly_puts(" + val + ");")
+        k = k + 1
+        next
+      end
       if at == "int"
         emit("  printf(\"%lld\\n\", (long long)" + val + ");")
       else
@@ -7339,13 +7681,17 @@ class Compiler
     pred_type = infer_type(pred)
     pred_val = compile_expr(pred)
     tmp = new_temp
-    if pred_type == "string"
-      emit("  const char *" + tmp + " = " + pred_val + ";")
+    if pred_type == "poly"
+      emit("  sp_RbVal " + tmp + " = " + pred_val + ";")
     else
-      if pred_type == "float"
-        emit("  mrb_float " + tmp + " = " + pred_val + ";")
+      if pred_type == "string"
+        emit("  const char *" + tmp + " = " + pred_val + ";")
       else
-        emit("  mrb_int " + tmp + " = " + pred_val + ";")
+        if pred_type == "float"
+          emit("  mrb_float " + tmp + " = " + pred_val + ";")
+        else
+          emit("  mrb_int " + tmp + " = " + pred_val + ";")
+        end
       end
     end
     conds = parse_id_list(@nd_conditions[nid])
