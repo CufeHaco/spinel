@@ -1054,6 +1054,12 @@ class Compiler
       end
       return "int_array"
     end
+    if mname == "to_sym"
+      return "string"
+    end
+    if mname == "ord"
+      return "int"
+    end
     if mname == "format"
       return "string"
     end
@@ -1278,6 +1284,12 @@ class Compiler
           end
           if mname == "exist?"
             return "bool"
+          end
+          if mname == "join"
+            return "string"
+          end
+          if mname == "basename"
+            return "string"
           end
         end
         if rcname == "ENV"
@@ -3556,6 +3568,12 @@ class Compiler
           rn = @nd_name[@nd_receiver[nid]]
           if rn == "File"
             @needs_file_io = 1
+            if mname == "join"
+              @needs_string_helpers = 1
+            end
+            if mname == "basename"
+              @needs_string_helpers = 1
+            end
           end
         end
       end
@@ -4043,6 +4061,8 @@ class Compiler
     emit_raw("static mrb_bool sp_StrArray_empty(sp_StrArray*a){return a->len==0;}")
     emit_raw("static const char*sp_StrArray_get(sp_StrArray*a,mrb_int i){if(i<0)i+=a->len;return a->data[i];}")
     emit_raw("static void sp_StrArray_set(sp_StrArray*a,mrb_int i,const char*v){if(i<0)i+=a->len;while(i>=a->len)sp_StrArray_push(a,\"\");a->data[i]=v;}")
+    emit_raw("static const char*sp_StrArray_join(sp_StrArray*a,const char*sep){size_t sl=strlen(sep),cap=256;char*buf=(char*)malloc(cap);size_t len=0;for(mrb_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}size_t el=strlen(a->data[i]);if(len+el>=cap){cap=(len+el)*2+1;buf=(char*)realloc(buf,cap);}memcpy(buf+len,a->data[i],el);len+=el;}buf[len]=0;return buf;}")
+    emit_raw("static mrb_bool sp_StrArray_include(sp_StrArray*a,const char*v){for(mrb_int i=0;i<a->len;i++)if(strcmp(a->data[i],v)==0)return TRUE;return FALSE;}")
     emit_raw("")
   end
 
@@ -4166,6 +4186,7 @@ class Compiler
     emit_raw("static mrb_bool sp_file_exist(const char *path) { FILE *f = fopen(path, \"r\"); if (f) { fclose(f); return TRUE; } return FALSE; }")
     emit_raw("static void sp_file_delete(const char *path) { remove(path); }")
     emit_raw("static const char *sp_backtick(const char *cmd) { FILE *p = popen(cmd, \"r\"); if (!p) return \"\"; char *buf = (char *)malloc(4096); size_t n = fread(buf, 1, 4095, p); buf[n] = 0; pclose(p); return buf; }")
+    emit_raw("static const char *sp_file_basename(const char *path) { const char *s = strrchr(path, '/'); if (s) return s + 1; return path; }")
     emit_raw("")
   end
 
@@ -6026,6 +6047,12 @@ class Compiler
       if mname == "frozen?"
         return "TRUE"
       end
+      if mname == "to_sym"
+        return rc
+      end
+      if mname == "ord"
+        return "((mrb_int)(unsigned char)" + rc + "[0])"
+      end
       if mname == "sub"
         args_id = @nd_arguments[nid]
         arg1 = "\"\""
@@ -6270,6 +6297,22 @@ class Compiler
       if mname == "last"
         return "sp_StrArray_get(" + rc + ", sp_StrArray_length(" + rc + ") - 1)"
       end
+      if mname == "join"
+        @needs_string_helpers = 1
+        return "sp_StrArray_join(" + rc + ", " + compile_arg0(nid) + ")"
+      end
+      if mname == "push"
+        return "(sp_StrArray_push(" + rc + ", " + compile_arg0(nid) + "), 0)"
+      end
+      if mname == "pop"
+        return "sp_StrArray_pop(" + rc + ")"
+      end
+      if mname == "empty?"
+        return "sp_StrArray_empty(" + rc + ")"
+      end
+      if mname == "include?"
+        return "sp_StrArray_include(" + rc + ", " + compile_arg0(nid) + ")"
+      end
     end
 
     # Hash methods
@@ -6368,6 +6411,21 @@ class Compiler
         if mname == "delete"
           @needs_file_io = 1
           return "(sp_file_delete(" + compile_arg0(nid) + "), 0)"
+        end
+        if mname == "join"
+          @needs_string_helpers = 1
+          args_id = @nd_arguments[nid]
+          if args_id >= 0
+            arg_ids = get_args(args_id)
+            if arg_ids.length >= 2
+              return "sp_str_concat(sp_str_concat(" + compile_expr(arg_ids[0]) + ", \"/\"), " + compile_expr(arg_ids[1]) + ")"
+            end
+          end
+          return "\"\""
+        end
+        if mname == "basename"
+          @needs_string_helpers = 1
+          return "sp_file_basename(" + compile_arg0(nid) + ")"
         end
       end
       # Time
