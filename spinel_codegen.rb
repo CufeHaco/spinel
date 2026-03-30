@@ -165,6 +165,16 @@ class Compiler
     @lambda_insert_pos = 0
   end
 
+  # Backslash-n for C string literals - bootstrap-safe (avoids escape level issues)
+  def bsl_n
+    92.chr + "n"
+  end
+
+  # Backslash for C char literals - bootstrap-safe
+  def bsl
+    92.chr
+  end
+
   def join_sep(arr, sep)
     result = ""
     i = 0
@@ -251,7 +261,7 @@ class Compiler
   end
 
   def read_text_ast(data)
-    lines = data.split("\n")
+    lines = data.split(10.chr)
     # Pass 1: find max node ID
     max_id = 0
     i = 0
@@ -349,15 +359,15 @@ class Compiler
         if i + 2 < s.length
           hex = s[i + 1] + s[i + 2]
           if hex == "0A"
-            result = result + "\n"
+            result = result + 10.chr
             i = i + 3
           else
             if hex == "0D"
-              result = result + "\r"
+              result = result + 13.chr
               i = i + 3
             else
               if hex == "09"
-                result = result + "\t"
+                result = result + 9.chr
                 i = i + 3
               else
                 if hex == "20"
@@ -591,6 +601,7 @@ class Compiler
   def push_scope
     @scope_names.push("---")
     @scope_types.push("---")
+    0
   end
 
   def pop_scope
@@ -609,6 +620,7 @@ class Compiler
   def declare_var(name, vtype)
     @scope_names.push(name)
     @scope_types.push(vtype)
+    0
   end
 
   def find_var_type(name)
@@ -741,18 +753,20 @@ class Compiler
       ind = ind + "  "
       j = j + 1
     end
-    @out = @out + ind + s + "\n"
+    @out = @out + ind + s + 10.chr
   end
 
   def emit_raw(s)
-    @out = @out + s + "\n"
+    @out = @out + s + 10.chr
   end
 
   def emit_return(val)
+    s = "" + val
     if @in_gc_scope == 1
       emit("  SP_GC_RESTORE();")
     end
-    emit("  return " + val + ";")
+    emit("  return " + s + ";")
+    0
   end
 
   # ---- Type inference ----
@@ -2948,6 +2962,7 @@ class Compiler
     @meth_body_ids.push(body_id)
     @meth_has_defaults.push(defaults_str)
     @meth_has_yield.push(body_has_yield(body_id))
+    0
   end
 
   def collect_define_method(nid)
@@ -3580,12 +3595,14 @@ class Compiler
                         ivar_types = @cls_ivar_types[i].split(";")
                         ij = 0
                         while ij < ivar_names.length
-                          if ivar_names[ij] == iname
-                            if ivar_types[ij] == "int"
-                              ivar_types[ij] = ptypes[pi]
-                            end
-                            if ivar_types[ij] == "nil"
-                              ivar_types[ij] = ptypes[pi]
+                          if ij < ivar_types.length
+                            if ivar_names[ij] == iname
+                              if ivar_types[ij] == "int"
+                                ivar_types[ij] = ptypes[pi]
+                              end
+                              if ivar_types[ij] == "nil"
+                                ivar_types[ij] = ptypes[pi]
+                              end
                             end
                           end
                           ij = ij + 1
@@ -3934,6 +3951,7 @@ class Compiler
   end
 
   def scan_writer_calls(nid)
+    bname = ""
     if nid < 0
       return
     end
@@ -4021,6 +4039,8 @@ class Compiler
       ivar_types = @cls_ivar_types[ci].split(";")
       changed = 0
       j = 0
+      bname = ""
+      iname = ""
       while j < mnames.length
         mn = mnames[j]
         if mn.length > 1
@@ -5570,7 +5590,7 @@ class Compiler
     # Update called method param types from argument types at call sites.
     # Run multiple passes for propagation.
     pass = 0
-    while pass < 3
+    while pass < 5
       ci = 0
       while ci < @cls_names.length
         mnames = @cls_meth_names[ci].split(";")
@@ -5886,7 +5906,7 @@ class Compiler
 
   def emit_gc_runtime
     emit_raw("typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); unsigned marked : 1; } sp_gc_hdr;")
-    emit_raw("static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = 256*1024*1024;")
+    emit_raw("static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = (size_t)-1;")
     emit_raw("#define SP_GC_STACK_MAX 65536")
     emit_raw("static void **sp_gc_roots[SP_GC_STACK_MAX]; static int sp_gc_nroots = 0;")
     emit_raw("#define SP_GC_SAVE() int __attribute__((cleanup(sp_gc_cleanup))) _gc_saved = sp_gc_nroots")
@@ -5989,7 +6009,7 @@ class Compiler
     emit_raw("static const char*sp_str_upcase(const char*s){size_t l=strlen(s);char*r=(char*)malloc(l+1);for(size_t i=0;i<=l;i++)r[i]=toupper((unsigned char)s[i]);return r;}")
     emit_raw("static const char*sp_str_downcase(const char*s){size_t l=strlen(s);char*r=(char*)malloc(l+1);for(size_t i=0;i<=l;i++)r[i]=tolower((unsigned char)s[i]);return r;}")
     emit_raw("static const char*sp_str_strip(const char*s){while(*s&&isspace((unsigned char)*s))s++;size_t l=strlen(s);while(l>0&&isspace((unsigned char)s[l-1]))l--;char*r=(char*)malloc(l+1);memcpy(r,s,l);r[l]=0;return r;}")
-    emit_raw("static const char*sp_str_chomp(const char*s){size_t l=strlen(s);while(l>0&&(s[l-1]=='\\n'||s[l-1]=='\\r'))l--;char*r=(char*)malloc(l+1);memcpy(r,s,l);r[l]=0;return r;}")
+    emit_raw("static const char*sp_str_chomp(const char*s){size_t l=strlen(s);while(l>0&&(s[l-1]=='" + bsl_n + "'||s[l-1]=='" + bsl + "r'))l--;char*r=(char*)malloc(l+1);memcpy(r,s,l);r[l]=0;return r;}")
     emit_raw("static mrb_bool sp_str_include(const char*s,const char*sub){return strstr(s,sub)!=NULL;}")
     emit_raw("static mrb_bool sp_str_start_with(const char*s,const char*p){return strncmp(s,p,strlen(p))==0;}")
     emit_raw("static mrb_bool sp_str_end_with(const char*s,const char*suf){size_t ls=strlen(s),lsuf=strlen(suf);if(lsuf>ls)return FALSE;return strcmp(s+ls-lsuf,suf)==0;}")
@@ -6036,12 +6056,12 @@ class Compiler
     emit_raw("static sp_RbVal sp_box_obj(void *p, int cls_id) { sp_RbVal r; r.tag = SP_TAG_OBJ; r.v.p = p; r.v.cls_id = cls_id; return r; }")
     emit_raw("static void sp_poly_puts(sp_RbVal v) {")
     emit_raw("  switch (v.tag) {")
-    emit_raw("    case SP_TAG_INT: printf(\"%lld\\n\", (long long)v.v.i); break;")
-    emit_raw("    case SP_TAG_STR: if (v.v.s) { fputs(v.v.s, stdout); if (!*v.v.s || v.v.s[strlen(v.v.s)-1] != '\\n') putchar('\\n'); } else putchar('\\n'); break;")
-    emit_raw("    case SP_TAG_FLT: { char _fb[64]; snprintf(_fb,64,\"%g\",v.v.f); if(!strchr(_fb,'.')&&!strchr(_fb,'e')&&!strchr(_fb,'i')&&!strchr(_fb,'n')){strcat(_fb,\".0\");} printf(\"%s\\n\",_fb); break; }")
+    emit_raw("    case SP_TAG_INT: printf(\"%lld" + bsl_n + "\", (long long)v.v.i); break;")
+    emit_raw("    case SP_TAG_STR: if (v.v.s) { fputs(v.v.s, stdout); if (!*v.v.s || v.v.s[strlen(v.v.s)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); break;")
+    emit_raw("    case SP_TAG_FLT: { char _fb[64]; snprintf(_fb,64,\"%g\",v.v.f); if(!strchr(_fb,'.')&&!strchr(_fb,'e')&&!strchr(_fb,'i')&&!strchr(_fb,'n')){strcat(_fb,\".0\");} printf(\"%s" + bsl_n + "\",_fb); break; }")
     emit_raw("    case SP_TAG_BOOL: puts(v.v.b ? \"true\" : \"false\"); break;")
-    emit_raw("    case SP_TAG_NIL: putchar('\\n'); break;")
-    emit_raw("    default: printf(\"%lld\\n\", (long long)v.v.i); break;")
+    emit_raw("    case SP_TAG_NIL: putchar('" + bsl_n + "'); break;")
+    emit_raw("    default: printf(\"%lld" + bsl_n + "\", (long long)v.v.i); break;")
     emit_raw("  }")
     emit_raw("}")
     emit_raw("static mrb_bool sp_poly_nil_p(sp_RbVal v) { return v.tag == SP_TAG_NIL; }")
@@ -6068,7 +6088,7 @@ class Compiler
     emit_raw("static volatile int sp_exc_top = 0;")
     emit_raw("static const char *sp_exc_cls[SP_EXC_STACK_MAX];")
     emit_raw("static volatile const char *sp_last_exc_cls = \"\";")
-    emit_raw("static void sp_raise_cls(const char *cls, const char *msg) { if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, \"unhandled exception: %s\\n\", msg); exit(1); }")
+    emit_raw("static void sp_raise_cls(const char *cls, const char *msg) { if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_last_exc_cls = cls; longjmp(sp_exc_stack[sp_exc_top-1], 1); } fprintf(stderr, \"unhandled exception: %s" + bsl_n + "\", msg); exit(1); }")
     emit_raw("static void sp_raise(const char *msg) { sp_raise_cls(\"RuntimeError\", msg); }")
     emit_raw("static mrb_bool sp_exc_is_a(const char *cls, const char *target) { return strcmp(cls, target) == 0; }")
     emit_raw("")
@@ -6078,7 +6098,7 @@ class Compiler
     emit_raw("static const char *sp_catch_tag[SP_CATCH_STACK_MAX];")
     emit_raw("static mrb_int sp_catch_val[SP_CATCH_STACK_MAX];")
     emit_raw("static volatile int sp_catch_top = 0;")
-    emit_raw("static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; while (i >= 0) { if (strcmp(sp_catch_tag[i], tag) == 0) { sp_catch_val[i] = val; sp_catch_top = i + 1; longjmp(sp_catch_stack[i], 1); } i--; } fprintf(stderr, \"uncaught throw: %s\\n\", tag); exit(1); }")
+    emit_raw("static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; while (i >= 0) { if (strcmp(sp_catch_tag[i], tag) == 0) { sp_catch_val[i] = val; sp_catch_top = i + 1; longjmp(sp_catch_stack[i], 1); } i--; } fprintf(stderr, \"uncaught throw: %s" + bsl_n + "\", tag); exit(1); }")
     emit_raw("")
   end
 
@@ -6108,7 +6128,7 @@ class Compiler
     emit_raw("struct sp_Val { enum { SP_PROC2, SP_INT2, SP_BOOL2, SP_NIL2 } tag; union { struct { sp_fn_t fn; int ncaptures; } proc; mrb_int ival; mrb_bool bval; } u; sp_Val *captures[]; };")
     emit_raw("#define SP_ARENA_SIZE ((size_t)16ULL * 1024 * 1024 * 1024)")
     emit_raw("static char *sp_arena = NULL; static size_t sp_arena_pos = 0;")
-    emit_raw("static void *sp_lam_alloc(size_t sz) { sz = (sz + 7) & ~(size_t)7; if (!sp_arena) { sp_arena = (char *)mmap(NULL, SP_ARENA_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0); if (sp_arena == MAP_FAILED) { perror(\"mmap\"); exit(1); } sp_arena_pos = 0; } if (sp_arena_pos + sz > SP_ARENA_SIZE) { fprintf(stderr, \"arena exhausted\\n\"); exit(1); } void *p = sp_arena + sp_arena_pos; sp_arena_pos += sz; return p; }")
+    emit_raw("static void *sp_lam_alloc(size_t sz) { sz = (sz + 7) & ~(size_t)7; if (!sp_arena) { sp_arena = (char *)mmap(NULL, SP_ARENA_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0); if (sp_arena == MAP_FAILED) { perror(\"mmap\"); exit(1); } sp_arena_pos = 0; } if (sp_arena_pos + sz > SP_ARENA_SIZE) { fprintf(stderr, \"arena exhausted" + bsl_n + "\"); exit(1); } void *p = sp_arena + sp_arena_pos; sp_arena_pos += sz; return p; }")
     emit_raw("static sp_Val *sp_lam_proc(sp_fn_t fn, int ncap) { sp_Val *v = (sp_Val *)sp_lam_alloc(sizeof(sp_Val) + sizeof(sp_Val *) * ncap); v->tag = SP_PROC2; v->u.proc.fn = fn; v->u.proc.ncaptures = ncap; return v; }")
     emit_raw("static sp_Val *sp_lam_int(mrb_int n) { sp_Val *v = (sp_Val *)sp_lam_alloc(sizeof(sp_Val)); v->tag = SP_INT2; v->u.ival = n; return v; }")
     emit_raw("static sp_Val *sp_lam_bool(mrb_bool b) { sp_Val *v = (sp_Val *)sp_lam_alloc(sizeof(sp_Val)); v->tag = SP_BOOL2; v->u.bval = b; return v; }")
@@ -6122,27 +6142,27 @@ class Compiler
     emit_raw("/* ---- StringIO runtime ---- */")
     emit_raw("typedef struct { char *buf; int64_t len; int64_t cap; int64_t pos; int64_t lineno; int closed; } sp_StringIO;")
     emit_raw("static void sio_grow(sp_StringIO *sio, int64_t need) { int64_t req = sio->pos + need; if (req <= sio->cap) return; int64_t nc = sio->cap ? sio->cap : 64; while (nc < req) nc *= 2; sio->buf = (char *)realloc(sio->buf, nc + 1); sio->cap = nc; }")
-    emit_raw("static int64_t sio_write(sp_StringIO *sio, const char *d, int64_t dl) { sio_grow(sio, dl); if (sio->pos > sio->len) memset(sio->buf + sio->len, 0, sio->pos - sio->len); memcpy(sio->buf + sio->pos, d, dl); sio->pos += dl; if (sio->pos > sio->len) sio->len = sio->pos; sio->buf[sio->len] = '\\0'; return dl; }")
+    emit_raw("static int64_t sio_write(sp_StringIO *sio, const char *d, int64_t dl) { sio_grow(sio, dl); if (sio->pos > sio->len) memset(sio->buf + sio->len, 0, sio->pos - sio->len); memcpy(sio->buf + sio->pos, d, dl); sio->pos += dl; if (sio->pos > sio->len) sio->len = sio->pos; sio->buf[sio->len] = '" + bsl + "0'; return dl; }")
     emit_raw("static sp_StringIO *sp_StringIO_new(void) { sp_StringIO *s = (sp_StringIO *)calloc(1, sizeof(sp_StringIO)); s->buf = (char *)calloc(1, 64); s->cap = 63; return s; }")
-    emit_raw("static sp_StringIO *sp_StringIO_new_s(const char *init) { sp_StringIO *s = (sp_StringIO *)calloc(1, sizeof(sp_StringIO)); int64_t l = (int64_t)strlen(init); int64_t c = l < 63 ? 63 : l; s->buf = (char *)malloc(c+1); memcpy(s->buf, init, l); s->buf[l]='\\0'; s->len = l; s->cap = c; return s; }")
+    emit_raw("static sp_StringIO *sp_StringIO_new_s(const char *init) { sp_StringIO *s = (sp_StringIO *)calloc(1, sizeof(sp_StringIO)); int64_t l = (int64_t)strlen(init); int64_t c = l < 63 ? 63 : l; s->buf = (char *)malloc(c+1); memcpy(s->buf, init, l); s->buf[l]='" + bsl + "0'; s->len = l; s->cap = c; return s; }")
     emit_raw("static const char *sp_StringIO_string(sp_StringIO *s) { return s->buf ? s->buf : \"\"; }")
     emit_raw("static int64_t sp_StringIO_pos(sp_StringIO *s) { return s->pos; }")
     emit_raw("static int64_t sp_StringIO_size(sp_StringIO *s) { return s->len; }")
     emit_raw("static int64_t sp_StringIO_write(sp_StringIO *s, const char *str) { return sio_write(s, str, (int64_t)strlen(str)); }")
-    emit_raw("static int64_t sp_StringIO_puts(sp_StringIO *s, const char *str) { int64_t l = (int64_t)strlen(str); sio_write(s, str, l); if (l == 0 || str[l-1] != '\\n') sio_write(s, \"\\n\", 1); return 0; }")
-    emit_raw("static int64_t sp_StringIO_puts_empty(sp_StringIO *s) { sio_write(s, \"\\n\", 1); return 0; }")
+    emit_raw("static int64_t sp_StringIO_puts(sp_StringIO *s, const char *str) { int64_t l = (int64_t)strlen(str); sio_write(s, str, l); if (l == 0 || str[l-1] != '" + bsl_n + "') sio_write(s, \"" + bsl_n + "\", 1); return 0; }")
+    emit_raw("static int64_t sp_StringIO_puts_empty(sp_StringIO *s) { sio_write(s, \"" + bsl_n + "\", 1); return 0; }")
     emit_raw("static int64_t sp_StringIO_print(sp_StringIO *s, const char *str) { return sio_write(s, str, (int64_t)strlen(str)); }")
     emit_raw("static int64_t sp_StringIO_putc(sp_StringIO *s, int64_t ch) { char c = (char)(ch & 0xFF); sio_write(s, &c, 1); return ch; }")
     emit_raw("static const char *sp_StringIO_read(sp_StringIO *s) { if (s->pos >= s->len) return \"\"; const char *r = s->buf + s->pos; s->pos = s->len; return r; }")
-    emit_raw("static const char *sp_StringIO_read_n(sp_StringIO *s, int64_t n) { if (s->pos >= s->len) return \"\"; int64_t rem = s->len - s->pos; if (n > rem) n = rem; char *r = (char *)malloc(n+1); memcpy(r, s->buf + s->pos, n); r[n] = '\\0'; s->pos += n; return r; }")
-    emit_raw("static const char *sp_StringIO_gets(sp_StringIO *s) { if (s->pos >= s->len) return NULL; const char *st = s->buf + s->pos; const char *nl = memchr(st, '\\n', s->len - s->pos); int64_t ll = nl ? (nl - st) + 1 : s->len - s->pos; char *r = (char *)malloc(ll+1); memcpy(r, st, ll); r[ll] = '\\0'; s->pos += ll; s->lineno++; return r; }")
-    emit_raw("static const char *sp_StringIO_getc(sp_StringIO *s) { if (s->pos >= s->len) return NULL; char *gc = (char *)malloc(2); gc[0] = s->buf[s->pos++]; gc[1] = '\\0'; return gc; }")
+    emit_raw("static const char *sp_StringIO_read_n(sp_StringIO *s, int64_t n) { if (s->pos >= s->len) return \"\"; int64_t rem = s->len - s->pos; if (n > rem) n = rem; char *r = (char *)malloc(n+1); memcpy(r, s->buf + s->pos, n); r[n] = '" + bsl + "0'; s->pos += n; return r; }")
+    emit_raw("static const char *sp_StringIO_gets(sp_StringIO *s) { if (s->pos >= s->len) return NULL; const char *st = s->buf + s->pos; const char *nl = memchr(st, '" + bsl_n + "', s->len - s->pos); int64_t ll = nl ? (nl - st) + 1 : s->len - s->pos; char *r = (char *)malloc(ll+1); memcpy(r, st, ll); r[ll] = '" + bsl + "0'; s->pos += ll; s->lineno++; return r; }")
+    emit_raw("static const char *sp_StringIO_getc(sp_StringIO *s) { if (s->pos >= s->len) return NULL; char *gc = (char *)malloc(2); gc[0] = s->buf[s->pos++]; gc[1] = '" + bsl + "0'; return gc; }")
     emit_raw("static int64_t sp_StringIO_getbyte(sp_StringIO *s) { if (s->pos >= s->len) return -1; return (int64_t)(unsigned char)s->buf[s->pos++]; }")
     emit_raw("static int64_t sp_StringIO_rewind(sp_StringIO *s) { s->pos = 0; s->lineno = 0; return 0; }")
     emit_raw("static int64_t sp_StringIO_seek(sp_StringIO *s, int64_t off) { if (off < 0) off = 0; s->pos = off; return 0; }")
     emit_raw("static int64_t sp_StringIO_tell(sp_StringIO *s) { return s->pos; }")
     emit_raw("static mrb_bool sp_StringIO_eof_p(sp_StringIO *s) { return s->pos >= s->len; }")
-    emit_raw("static int64_t sp_StringIO_truncate(sp_StringIO *s, int64_t l) { if (l < 0) l = 0; if (l < s->len) { s->len = l; s->buf[l] = '\\0'; } return 0; }")
+    emit_raw("static int64_t sp_StringIO_truncate(sp_StringIO *s, int64_t l) { if (l < 0) l = 0; if (l < s->len) { s->len = l; s->buf[l] = '" + bsl + "0'; } return 0; }")
     emit_raw("static int64_t sp_StringIO_close(sp_StringIO *s) { s->closed = 1; return 0; }")
     emit_raw("static mrb_bool sp_StringIO_closed_p(sp_StringIO *s) { return s->closed; }")
     emit_raw("static sp_StringIO *sp_StringIO_flush(sp_StringIO *s) { return s; }")
@@ -7948,31 +7968,31 @@ class Compiler
     i = 0
     while i < s.length
       ch = s[i]
-      if ch == "\\"
+      if ch == bsl
         # Check for Ruby escape sequences
         if i + 1 < s.length
           nch = s[i + 1]
           if nch == "n"
-            result = result + "\\n"
+            result = result + bsl_n
             i = i + 2
           else
             if nch == "t"
-              result = result + "\\t"
+              result = result + bsl + "t"
               i = i + 2
             else
               if nch == "r"
-                result = result + "\\r"
+                result = result + bsl + "r"
                 i = i + 2
               else
-                if nch == "\\"
-                  result = result + "\\\\"
+                if nch == bsl
+                  result = result + bsl + bsl
                   i = i + 2
                 else
                   if nch == "\""
-                    result = result + "\\\""
+                    result = result + bsl + "\""
                     i = i + 2
                   else
-                    result = result + "\\\\"
+                    result = result + bsl + bsl
                     i = i + 1
                   end
                 end
@@ -7985,16 +8005,16 @@ class Compiler
         end
       else
         if ch == "\""
-          result = result + "\\\""
+          result = result + bsl + "\""
         else
-          if ch == "\n"
-            result = result + "\\n"
+          if ch == 10.chr
+            result = result + bsl_n
           else
-            if ch == "\r"
-              result = result + "\\r"
+            if ch == 13.chr
+              result = result + bsl + "r"
             else
-              if ch == "\t"
-                result = result + "\\t"
+              if ch == 9.chr
+                result = result + bsl + "t"
               else
                 result = result + ch
               end
@@ -8078,17 +8098,17 @@ class Compiler
       if ch == "%"
         result = result + "%%"
       else
-        if ch == "\\"
-          result = result + "\\\\"
+        if ch == bsl
+          result = result + bsl + bsl
         else
           if ch == "\""
-            result = result + "\\\""
+            result = result + bsl + "\""
           else
-            if ch == "\n"
-              result = result + "\\n"
+            if ch == 10.chr
+              result = result + bsl_n
             else
-              if ch == "\t"
-                result = result + "\\t"
+              if ch == 9.chr
+                result = result + bsl + "t"
               else
                 result = result + ch
               end
@@ -10145,6 +10165,7 @@ class Compiler
       ptypes = all_ptypes[target_midx].split(",")
     end
     result = ""
+    pcname = ""
     k = 0
     while k < arg_ids.length
       if k > 0
@@ -10358,11 +10379,11 @@ class Compiler
     if t == "LocalVariableWriteNode"
       lname = @nd_name[nid]
       # Check for method(:name) assignment
-      expr = @nd_expression[nid]
-      if expr >= 0
-        if @nd_type[expr] == "CallNode"
-          if @nd_name[expr] == "method"
-            args_id = @nd_arguments[expr]
+      expr_id = @nd_expression[nid]
+      if expr_id >= 0
+        if @nd_type[expr_id] == "CallNode"
+          if @nd_name[expr_id] == "method"
+            args_id = @nd_arguments[expr_id]
             if args_id >= 0
               arg_ids = get_args(args_id)
               if arg_ids.length >= 1
@@ -11442,11 +11463,11 @@ class Compiler
               if args_id >= 0
                 arg_ids = get_args(args_id)
                 if arg_ids.length >= 1
-                  emit("  fprintf(" + ftmp + ", \"%s\\n\", " + compile_expr(arg_ids[0]) + ");")
+                  emit("  fprintf(" + ftmp + ", \"%s" + bsl_n + "\", " + compile_expr(arg_ids[0]) + ");")
                   return
                 end
               end
-              emit("  fputc('\\n', " + ftmp + ");")
+              emit("  fputc('" + bsl_n + "', " + ftmp + ");")
               return
             end
           end
@@ -11862,7 +11883,7 @@ class Compiler
             @lambda_funcs = @lambda_funcs + "  sp_Val *lv_" + pname + " = arg;\n"
           end
           @lambda_funcs = @lambda_funcs + "  (void)self;\n"
-          @lambda_funcs = @lambda_funcs + body_stmts + "\n"
+          @lambda_funcs = @lambda_funcs + body_stmts + 10.chr
           @lambda_funcs = @lambda_funcs + "  return " + bexpr + ";\n"
           @lambda_funcs = @lambda_funcs + "}\n\n"
         else
@@ -12023,12 +12044,12 @@ class Compiler
   def compile_puts(nid)
     args_id = @nd_arguments[nid]
     if args_id < 0
-      emit("  putchar('\\n');")
+      emit("  putchar('" + bsl_n + "');")
       return
     end
     arg_ids = get_args(args_id)
     if arg_ids.length == 0
-      emit("  putchar('\\n');")
+      emit("  putchar('" + bsl_n + "');")
       return
     end
     k = 0
@@ -12043,13 +12064,13 @@ class Compiler
         next
       end
       if at == "int"
-        emit("  printf(\"%lld\\n\", (long long)" + val + ");")
+        emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
       else
         if at == "float"
-          emit("  printf(\"%g\\n\", " + val + ");")
+          emit("  printf(\"%g" + bsl_n + "\", " + val + ");")
         else
           if at == "string"
-            emit("  { const char *_ps = " + val + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); } else putchar('\\n'); }")
+            emit("  { const char *_ps = " + val + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
           else
             if at == "bool"
               emit("  puts(" + val + " ? \"true\" : \"false\");")
@@ -12059,18 +12080,18 @@ class Compiler
                 owner = find_method_owner(find_class_idx(cname), "to_s")
                 if owner != ""
                   sv = "sp_" + owner + "_to_s(" + (owner == cname ? val : "(sp_" + owner + " *)" + val) + ")"
-                  emit("  { const char *_ps = " + sv + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '\\n') putchar('\\n'); } else putchar('\\n'); }")
+                  emit("  { const char *_ps = " + sv + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
                 else
-                  emit("  printf(\"%lld\\n\", (long long)(mrb_int)" + val + ");")
+                  emit("  printf(\"%lld" + bsl_n + "\", (long long)(mrb_int)" + val + ");")
                 end
               else
                 if at == "str_array"
                   emit("  { sp_StrArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) puts(_pa->data[_pi]); }")
                 else
                   if at == "int_array"
-                    emit("  { sp_IntArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) printf(\"%lld\\n\", (long long)_pa->data[_pa->start + _pi]); }")
+                    emit("  { sp_IntArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) printf(\"%lld" + bsl_n + "\", (long long)_pa->data[_pa->start + _pi]); }")
                   else
-                    emit("  printf(\"%lld\\n\", (long long)" + val + ");")
+                    emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
                   end
                 end
               end
@@ -12085,7 +12106,7 @@ class Compiler
   def compile_stderr_puts(nid)
     args_id = @nd_arguments[nid]
     if args_id < 0
-      emit("  fputc('\\n', stderr);")
+      emit("  fputc('" + bsl_n + "', stderr);")
       return
     end
     arg_ids = get_args(args_id)
@@ -12094,9 +12115,9 @@ class Compiler
       at = infer_type(arg_ids[k])
       val = compile_expr(arg_ids[k])
       if at == "string"
-        emit("  fprintf(stderr, \"%s\\n\", " + val + ");")
+        emit("  fprintf(stderr, \"%s" + bsl_n + "\", " + val + ");")
       else
-        emit("  fprintf(stderr, \"%lld\\n\", (long long)" + val + ");")
+        emit("  fprintf(stderr, \"%lld" + bsl_n + "\", (long long)" + val + ");")
       end
       k = k + 1
     end
@@ -13321,6 +13342,16 @@ class Compiler
   end
 
   def scan_captured_locals(nid, excludes, names, types)
+    # Type hint: use str_array method to force param typing
+    if excludes.length < 0
+      excludes.push("")
+    end
+    if names.length < 0
+      names.push("")
+    end
+    if types.length < 0
+      types.push("")
+    end
     if nid < 0
       return
     end
@@ -13590,6 +13621,16 @@ class Compiler
     end
     # For statement-like nodes as last expression, compile as stmt then return default
     lt = @nd_type[last]
+    if lt == "CallNode"
+      lm = @nd_name[last]
+      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw"
+        compile_stmt(last)
+        if return_type != "void"
+          emit("  return " + c_default_val(return_type) + ";")
+        end
+        return
+      end
+    end
     if lt == "InstanceVariableWriteNode"
       compile_stmt(last)
       if return_type != "void"
