@@ -109,6 +109,7 @@ class Compiler
     @in_main = 0
     @in_loop = 0
     @in_yield_method = 0
+    @in_gc_scope = 0
 
     # Yield/block tracking (parallel with meth_names / cls_meth_names)
     @meth_has_yield = []
@@ -733,6 +734,13 @@ class Compiler
 
   def emit_raw(s)
     @out = @out + s + "\n"
+  end
+
+  def emit_return(val)
+    if @in_gc_scope == 1
+      emit("  SP_GC_RESTORE();")
+    end
+    emit("  return " + val + ";")
   end
 
   # ---- Type inference ----
@@ -2848,11 +2856,36 @@ class Compiler
         @const_types.push(ct)
         @const_expr_ids.push(expr_id)
       end
-      # Don't collect module DefNodes as top-level methods -
-      # they will be included into classes via collect_module_methods_into_class
-      # if @nd_type[sid] == "DefNode"
-      #   collect_toplevel_method(sid)
-      # end
+      # Collect module class methods (def self.xxx) as top-level functions
+      if @nd_type[sid] == "DefNode"
+        if @nd_receiver[sid] >= 0
+          if @nd_type[@nd_receiver[sid]] == "SelfNode"
+            dmname = @nd_name[sid]
+            # Create as top-level method with module prefix for dispatch
+            mi = @meth_names.length
+            @meth_names.push(mname + "_cls_" + dmname)
+            @meth_param_names.push(collect_params_str(sid))
+            @meth_param_types.push(collect_ptypes_str(sid, -1))
+            @meth_return_types.push("int")
+            @meth_body_ids.push(@nd_body[sid])
+            @meth_has_yield.push(0)
+            @meth_has_defaults.push("0")
+          end
+        end
+      end
+      # Collect module-level ivar writes as global statics
+      if @nd_type[sid] == "InstanceVariableWriteNode"
+        iname = @nd_name[sid]
+        cname2 = mname + "_" + iname[1, iname.length - 1]
+        expr_id = @nd_expression[sid]
+        ct = "int"
+        if expr_id >= 0
+          ct = infer_type(expr_id)
+        end
+        @const_names.push(cname2)
+        @const_types.push(ct)
+        @const_expr_ids.push(expr_id)
+      end
       j = j + 1
     end
   end
@@ -3581,6 +3614,52 @@ class Compiler
       pop_scope
       i = i + 1
     end
+    # Scan class method bodies
+    ci = 0
+    while ci < @cls_names.length
+      @current_class_idx = ci
+      bodies = @cls_meth_bodies[ci].split(";")
+      mnames = @cls_meth_names[ci].split(";")
+      all_params = @cls_meth_params[ci].split("|")
+      all_ptypes = @cls_meth_ptypes[ci].split("|")
+      bj = 0
+      while bj < bodies.length
+        bid = bodies[bj].to_i
+        if bid >= 0
+          push_scope
+          pnames2 = "".split(",")
+          ptypes2 = "".split(",")
+          if bj < all_params.length
+            pnames2 = all_params[bj].split(",")
+          end
+          if bj < all_ptypes.length
+            ptypes2 = all_ptypes[bj].split(",")
+          end
+          pk = 0
+          while pk < pnames2.length
+            pt = "int"
+            if pk < ptypes2.length
+              pt = ptypes2[pk]
+            end
+            declare_var(pnames2[pk], pt)
+            pk = pk + 1
+          end
+          ml2 = "".split(",")
+          mt2 = "".split(",")
+          scan_locals(bid, ml2, mt2, pnames2)
+          lk2 = 0
+          while lk2 < ml2.length
+            declare_var(ml2[lk2], mt2[lk2])
+            lk2 = lk2 + 1
+          end
+          scan_writer_calls(bid)
+          pop_scope
+        end
+        bj = bj + 1
+      end
+      ci = ci + 1
+    end
+    @current_class_idx = -1
     # Scan main-level code
     scan_writer_calls(@root_id)
     pop_scope
@@ -4961,6 +5040,7 @@ class Compiler
       emit_stringio_runtime
     end
     emit_class_structs
+    emit_gc_scan_functions
     emit_forward_decls
     emit_global_constants
     emit_class_methods
@@ -5015,11 +5095,14 @@ class Compiler
     emit_raw("static sp_gc_hdr *sp_gc_heap = NULL; static size_t sp_gc_bytes = 0; static size_t sp_gc_threshold = 4*1024*1024;")
     emit_raw("#define SP_GC_STACK_MAX 65536")
     emit_raw("static void **sp_gc_roots[SP_GC_STACK_MAX]; static int sp_gc_nroots = 0;")
-    emit_raw("#define SP_GC_SAVE() int _gc_saved = sp_gc_nroots")
+    emit_raw("#define SP_GC_SAVE() int __attribute__((cleanup(sp_gc_cleanup))) _gc_saved = sp_gc_nroots")
     emit_raw("#define SP_GC_ROOT(v) do{if(sp_gc_nroots<SP_GC_STACK_MAX)sp_gc_roots[sp_gc_nroots++]=(void**)&(v);}while(0)")
     emit_raw("#define SP_GC_RESTORE() sp_gc_nroots = _gc_saved")
+    emit_raw("static char *sp_gc_stack_bottom = NULL;")
     emit_raw("static void sp_gc_mark(void*obj){if(!obj)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(h->marked)return;h->marked=1;if(h->scan)h->scan(obj);}")
-    emit_raw("static void sp_gc_collect(void){for(int i=0;i<sp_gc_nroots;i++){void*obj=*sp_gc_roots[i];if(obj)sp_gc_mark(obj);}sp_gc_hdr**pp=&sp_gc_heap;sp_gc_bytes=0;while(*pp){sp_gc_hdr*h=*pp;if(!h->marked){*pp=h->next;if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}else{h->marked=0;sp_gc_bytes+=sizeof(sp_gc_hdr);pp=&h->next;}}}")
+    emit_raw("static void sp_gc_cleanup(int*p){sp_gc_nroots=*p;}")
+    emit_raw("static void sp_gc_mark_stack(void){volatile char dummy;char*sp=(char*)&dummy;char*lo=sp,*hi=sp_gc_stack_bottom;if(lo>hi){char*t=lo;lo=hi;hi=t;}for(sp_gc_hdr*h=sp_gc_heap;h;h=h->next){void*obj=(char*)h+sizeof(sp_gc_hdr);void**p=(void**)lo;while((char*)p<hi){if(*p==obj){sp_gc_mark(obj);break;}p++;}}}")
+    emit_raw("static void sp_gc_collect(void){for(int i=0;i<sp_gc_nroots;i++){void*obj=*sp_gc_roots[i];if(obj)sp_gc_mark(obj);}sp_gc_mark_stack();sp_gc_hdr**pp=&sp_gc_heap;sp_gc_bytes=0;while(*pp){sp_gc_hdr*h=*pp;if(!h->marked){*pp=h->next;if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}else{h->marked=0;sp_gc_bytes+=sizeof(sp_gc_hdr);pp=&h->next;}}}")
     emit_raw("static void*sp_gc_alloc(size_t sz,void(*fin)(void*),void(*scn)(void*)){if(sp_gc_bytes>sp_gc_threshold){sp_gc_collect();if(sp_gc_bytes>sp_gc_threshold/2)sp_gc_threshold*=2;}sp_gc_hdr*h=(sp_gc_hdr*)calloc(1,sizeof(sp_gc_hdr)+sz);h->finalize=fin;h->scan=scn;h->next=sp_gc_heap;sp_gc_heap=h;sp_gc_bytes+=sizeof(sp_gc_hdr)+sz;return(char*)h+sizeof(sp_gc_hdr);}")
     emit_raw("")
   end
@@ -5372,6 +5455,69 @@ class Compiler
       end
     end
     0
+  end
+
+  def class_has_ptr_ivars(ci)
+    names = @cls_ivar_names[ci].split(";")
+    types = @cls_ivar_types[ci].split(";")
+    j = 0
+    while j < names.length
+      if j < types.length
+        if is_obj_type(types[j]) == 1
+          return 1
+        end
+      end
+      j = j + 1
+    end
+    if @cls_parents[ci] != ""
+      pi = find_class_idx(@cls_parents[ci])
+      if pi >= 0
+        return class_has_ptr_ivars(pi)
+      end
+    end
+    0
+  end
+
+  def emit_gc_scan_functions
+    i = 0
+    while i < @cls_names.length
+      if class_has_ptr_ivars(i) == 1
+        cname = @cls_names[i]
+        emit_raw("static void sp_" + cname + "_gc_scan(void *p) {")
+        emit_raw("  sp_" + cname + " *self = (sp_" + cname + " *)p;")
+        names = @cls_ivar_names[i].split(";")
+        types = @cls_ivar_types[i].split(";")
+        j = 0
+        while j < names.length
+          if j < types.length
+            if is_obj_type(types[j]) == 1
+              emit_raw("  if (self->" + sanitize_ivar(names[j]) + ") sp_gc_mark(self->" + sanitize_ivar(names[j]) + ");")
+            end
+          end
+          j = j + 1
+        end
+        # Also scan parent fields
+        if @cls_parents[i] != ""
+          pi = find_class_idx(@cls_parents[i])
+          if pi >= 0
+            pnames = @cls_ivar_names[pi].split(";")
+            ptypes = @cls_ivar_types[pi].split(";")
+            pj = 0
+            while pj < pnames.length
+              if pj < ptypes.length
+                if is_obj_type(ptypes[pj]) == 1
+                  emit_raw("  if (self->" + sanitize_ivar(pnames[pj]) + ") sp_gc_mark(self->" + sanitize_ivar(pnames[pj]) + ");")
+                end
+              end
+              pj = pj + 1
+            end
+          end
+        end
+        emit_raw("}")
+        emit_raw("")
+      end
+      i = i + 1
+    end
   end
 
   # ---- Forward declarations ----
@@ -5734,7 +5880,11 @@ class Compiler
     init_idx = cls_find_method_direct(ci, "initialize")
     emit_raw("static sp_" + cname + " *sp_" + cname + "_new(" + constructor_params_decl(ci) + ") {")
     emit_raw("  SP_GC_SAVE();")
-    emit_raw("  sp_" + cname + " *self = (sp_" + cname + " *)sp_gc_alloc(sizeof(sp_" + cname + "), NULL, NULL);")
+    scan_fn = "NULL"
+    if class_has_ptr_ivars(ci) == 1
+      scan_fn = "sp_" + cname + "_gc_scan"
+    end
+    emit_raw("  sp_" + cname + " *self = (sp_" + cname + " *)sp_gc_alloc(sizeof(sp_" + cname + "), NULL, " + scan_fn + ");")
     emit_raw("  SP_GC_ROOT(self);")
 
     init_ci = find_init_class(ci)
@@ -5909,6 +6059,7 @@ class Compiler
     @current_method_name = mname
     @current_method_return = rt
     @indent = 1
+    @in_gc_scope = 0
 
     midx = cls_find_method_direct(ci, mname)
     if midx >= 0
@@ -5956,6 +6107,7 @@ class Compiler
     @current_method_name = mname
     @current_method_return = rt
     @indent = 1
+    @in_gc_scope = 0
 
     emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(mname) + "(" + build_params_decl(pnames, ptypes) + ") {")
 
@@ -6032,6 +6184,7 @@ class Compiler
     @current_method_return = @meth_return_types[mi]
     @indent = 1
     @in_main = 0
+    @in_gc_scope = 0
 
     # Check if this is an open class method
     oc_type = ""
@@ -6147,6 +6300,7 @@ class Compiler
     if has_gc_locals == 1
       if @needs_gc == 1
         emit("  SP_GC_SAVE();")
+        @in_gc_scope = 1
       end
     end
     j = 0
@@ -6469,6 +6623,9 @@ class Compiler
     emit_raw("static sp_Argv sp_argv;")
     emit_raw("")
     emit_raw("int main(int argc,char**argv){")
+    if @needs_gc == 1
+      emit_raw("  { volatile char _sb; sp_gc_stack_bottom = (char*)&_sb; }")
+    end
     emit_raw("  sp_argv.data=(const char**)(argv+1);sp_argv.len=argc-1;")
 
     @in_main = 1
@@ -6619,6 +6776,22 @@ class Compiler
       return "lv_" + @nd_name[nid]
     end
     if t == "InstanceVariableReadNode"
+      # Check if we're in a module class method
+      mi3 = 0
+      while mi3 < @module_names.length
+        mmod = @module_names[mi3]
+        if mmod != ""
+          if @current_method_name.start_with?(mmod + "_cls_")
+            iname = @nd_name[nid]
+            cname3 = mmod + "_" + iname[1, iname.length - 1]
+            ci3 = find_const_idx(cname3)
+            if ci3 >= 0
+              return "cst_" + cname3
+            end
+          end
+        end
+        mi3 = mi3 + 1
+      end
       return "self->" + sanitize_ivar(@nd_name[nid])
     end
     if t == "ConstantReadNode"
@@ -8331,6 +8504,41 @@ class Compiler
           return "getenv(\"HOME\")"
         end
       end
+      # Module class method dispatch
+      mi2 = 0
+      while mi2 < @module_names.length
+        if @module_names[mi2] == rcname
+          # Look for module class method
+          mfn = rcname + "_cls_" + mname
+          mfi = find_method_idx(mfn)
+          if mfi >= 0
+            ca = compile_call_args(nid)
+            if ca != ""
+              return "sp_" + sanitize_name(mfn) + "(" + ca + ")"
+            else
+              return "sp_" + sanitize_name(mfn) + "()"
+            end
+          end
+        end
+        mi2 = mi2 + 1
+      end
+      # Class method dispatch (def self.xxx)
+      ci3 = find_class_idx(rcname)
+      if ci3 >= 0
+        cmnames = @cls_cmeth_names[ci3].split(";")
+        cj = 0
+        while cj < cmnames.length
+          if cmnames[cj] == mname
+            ca = compile_call_args(nid)
+            if ca != ""
+              return "sp_" + rcname + "_cls_" + sanitize_name(mname) + "(" + ca + ")"
+            else
+              return "sp_" + rcname + "_cls_" + sanitize_name(mname) + "()"
+            end
+          end
+          cj = cj + 1
+        end
+      end
     end
 
     # to_a on range (including parenthesized range)
@@ -9516,9 +9724,21 @@ class Compiler
     if args_id >= 0
       arg_ids = get_args(args_id)
       if arg_ids.length > 0
-        emit("  return " + compile_expr(arg_ids[0]) + ";")
+        if @in_gc_scope == 1
+          # Save return value, restore GC, then return
+          rt = infer_type(arg_ids[0])
+          tmp = new_temp
+          emit("  " + c_type(rt) + " " + tmp + " = " + compile_expr(arg_ids[0]) + ";")
+          emit("  SP_GC_RESTORE();")
+          emit("  return " + tmp + ";")
+        else
+          emit("  return " + compile_expr(arg_ids[0]) + ";")
+        end
         return
       end
+    end
+    if @in_gc_scope == 1
+      emit("  SP_GC_RESTORE();")
     end
     emit("  return 0;")
   end
