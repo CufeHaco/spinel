@@ -1130,6 +1130,15 @@ class Compiler
     if mname == "succ"
       return "int"
     end
+    if mname == "getbyte"
+      return "int"
+    end
+    if mname == "bytesize"
+      return "int"
+    end
+    if mname == "setbyte"
+      return "int"
+    end
     if mname == "__method__"
       return "string"
     end
@@ -7775,6 +7784,22 @@ class Compiler
       end
       if mname == "dup"
         return "sp_str_dup(" + rc + ")"
+      end
+      if mname == "getbyte"
+        return "((mrb_int)(unsigned char)(" + rc + ")[" + compile_arg0(nid) + "])"
+      end
+      if mname == "setbyte"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          a = get_args(args_id)
+          if a.length >= 2
+            return "(((char*)" + rc + ")[" + compile_expr(a[0]) + "] = (char)" + compile_expr(a[1]) + ", 0)"
+          end
+        end
+        return "0"
+      end
+      if mname == "bytesize"
+        return "(mrb_int)strlen(" + rc + ")"
       end
       if mname == "to_s"
         return rc
