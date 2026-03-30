@@ -1106,6 +1106,15 @@ class Compiler
     if mname == "clamp"
       return "int"
     end
+    if mname == "itself"
+      if recv >= 0
+        return infer_type(recv)
+      end
+      return "int"
+    end
+    if mname == "succ"
+      return "int"
+    end
     if mname == "__method__"
       return "string"
     end
@@ -1860,7 +1869,7 @@ class Compiler
       i = i + 1
     end
 
-    # Pass 2: top-level methods, constants (modules already collected in Pass 0)
+    # Pass 2: top-level methods, constants, define_method
     i = 0
     while i < stmts.length
       sid = stmts[i]
@@ -1869,6 +1878,11 @@ class Compiler
       end
       if @nd_type[sid] == "ConstantWriteNode"
         collect_constant(sid)
+      end
+      if @nd_type[sid] == "CallNode"
+        if @nd_name[sid] == "define_method"
+          collect_define_method(sid)
+        end
       end
       i = i + 1
     end
@@ -2712,6 +2726,54 @@ class Compiler
     @meth_body_ids.push(body_id)
     @meth_has_defaults.push(defaults_str)
     @meth_has_yield.push(body_has_yield(body_id))
+  end
+
+  def collect_define_method(nid)
+    # define_method(:name) { |args| body }
+    args_id = @nd_arguments[nid]
+    if args_id < 0
+      return
+    end
+    arg_ids = get_args(args_id)
+    if arg_ids.length < 1
+      return
+    end
+    mname = @nd_content[arg_ids[0]]
+    if mname == ""
+      mname = @nd_name[arg_ids[0]]
+    end
+    blk = @nd_block[nid]
+    if blk < 0
+      return
+    end
+    body_id = @nd_body[blk]
+    # Collect block params
+    params_str = ""
+    ptypes_str = ""
+    bp = @nd_parameters[blk]
+    if bp >= 0
+      inner = @nd_parameters[bp]
+      if inner >= 0
+        reqs = parse_id_list(@nd_requireds[inner])
+        k = 0
+        while k < reqs.length
+          if params_str != ""
+            params_str = params_str + ","
+            ptypes_str = ptypes_str + ","
+          end
+          params_str = params_str + @nd_name[reqs[k]]
+          ptypes_str = ptypes_str + "int"
+          k = k + 1
+        end
+      end
+    end
+    @meth_names.push(mname)
+    @meth_param_names.push(params_str)
+    @meth_param_types.push(ptypes_str)
+    @meth_return_types.push("int")
+    @meth_body_ids.push(body_id)
+    @meth_has_defaults.push("")
+    @meth_has_yield.push(0)
   end
 
   def collect_module(nid)
@@ -7704,9 +7766,18 @@ class Compiler
         @needs_string_helpers = 1
         return "sp_int_chr(" + rc + ")"
       end
+      if mname == "succ"
+        return "((" + rc + ") + 1)"
+      end
+      if mname == "itself"
+        return rc
+      end
     end
 
     if recv_type == "float"
+      if mname == "itself"
+        return rc
+      end
       if mname == "to_s"
         @needs_string_helpers = 1
         return "sp_float_to_s(" + rc + ")"
@@ -9326,6 +9397,11 @@ class Compiler
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
 
+    # define_method is handled at collection time, skip at runtime
+    if mname == "define_method"
+      return
+    end
+
     if mname == "puts"
       if recv < 0
         compile_puts(nid)
@@ -10089,14 +10165,18 @@ class Compiler
     rc = compile_expr(@nd_receiver[nid])
     bp1 = get_block_param(nid, 0)
     bp2 = get_block_param(nid, 1)
+    has_bp = 1
     if bp1 == ""
+      has_bp = 0
       bp1 = "_x"
     end
 
     if rt == "int_array"
       tmp = new_temp
       emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_IntArray_length(" + rc + "); " + tmp + "++) {")
-      emit("    lv_" + bp1 + " = sp_IntArray_get(" + rc + ", " + tmp + ");")
+      if has_bp == 1
+        emit("    lv_" + bp1 + " = sp_IntArray_get(" + rc + ", " + tmp + ");")
+      end
       @indent = @indent + 1
       compile_stmts_body(@nd_body[@nd_block[nid]])
       @indent = @indent - 1
@@ -10105,7 +10185,9 @@ class Compiler
     if rt == "str_array"
       tmp = new_temp
       emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_StrArray_length(" + rc + "); " + tmp + "++) {")
-      emit("    lv_" + bp1 + " = sp_StrArray_get(" + rc + ", " + tmp + ");")
+      if has_bp == 1
+        emit("    lv_" + bp1 + " = sp_StrArray_get(" + rc + ", " + tmp + ");")
+      end
       @indent = @indent + 1
       compile_stmts_body(@nd_body[@nd_block[nid]])
       @indent = @indent - 1
