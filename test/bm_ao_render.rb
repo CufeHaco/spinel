@@ -180,39 +180,52 @@ def clamp(f)
   i.to_i
 end
 
-def orthoBasis(basis, n)
-  basis[2] = Vec.new(n.x, n.y, n.z)
-  basis[1] = Vec.new(0.0, 0.0, 0.0)
-
-  if n.x < 0.6 and n.x > -0.6
-    basis[1].x = 1.0
-  elsif n.y < 0.6 and n.y > -0.6
-    basis[1].y = 1.0
-  elsif n.z < 0.6 and n.z > -0.6
-    basis[1].z = 1.0
-  else
-    basis[1].x = 1.0
+class Basis
+  def initialize
+    @b0 = Vec.new(0.0, 0.0, 0.0)
+    @b1 = Vec.new(0.0, 0.0, 0.0)
+    @b2 = Vec.new(0.0, 0.0, 0.0)
   end
+  def b0; @b0; end
+  def b0=(v); @b0 = v; end
+  def b1; @b1; end
+  def b1=(v); @b1 = v; end
+  def b2; @b2; end
+  def b2=(v); @b2 = v; end
 
-  basis[0] = basis[1].vcross(basis[2])
-  basis[0] = basis[0].vnormalize
+  def compute(n)
+    @b2 = Vec.new(n.x, n.y, n.z)
+    @b1 = Vec.new(0.0, 0.0, 0.0)
 
-  basis[1] = basis[2].vcross(basis[0])
-  basis[1] = basis[1].vnormalize
+    if n.x < 0.6 and n.x > -0.6
+      @b1.x = 1.0
+    elsif n.y < 0.6 and n.y > -0.6
+      @b1.y = 1.0
+    elsif n.z < 0.6 and n.z > -0.6
+      @b1.z = 1.0
+    else
+      @b1.x = 1.0
+    end
+
+    @b0 = @b1.vcross(@b2)
+    @b0 = @b0.vnormalize
+
+    @b1 = @b2.vcross(@b0)
+    @b1 = @b1.vnormalize
+  end
 end
 
 class Scene
   def initialize
-    @spheres = Array.new
-    @spheres[0] = Sphere.new(Vec.new(-2.0, 0.0, -3.5), 0.5)
-    @spheres[1] = Sphere.new(Vec.new(-0.5, 0.0, -3.0), 0.5)
-    @spheres[2] = Sphere.new(Vec.new(1.0, 0.0, -2.2), 0.5)
+    @s0 = Sphere.new(Vec.new(-2.0, 0.0, -3.5), 0.5)
+    @s1 = Sphere.new(Vec.new(-0.5, 0.0, -3.0), 0.5)
+    @s2 = Sphere.new(Vec.new(1.0, 0.0, -2.2), 0.5)
     @plane = Plane.new(Vec.new(0.0, -0.5, 0.0), Vec.new(0.0, 1.0, 0.0))
   end
 
   def ambient_occlusion(isect)
-    basis = Array.new(3)
-    orthoBasis(basis, isect.n)
+    basis = Basis.new
+    basis.compute(isect.n)
 
     ntheta    = NAO_SAMPLES
     nphi      = NAO_SAMPLES
@@ -230,17 +243,17 @@ class Scene
         y = Math.sin(phi) * Math.sqrt(1.0 - r)
         z = Math.sqrt(r)
 
-        rx = x * basis[0].x + y * basis[1].x + z * basis[2].x
-        ry = x * basis[0].y + y * basis[1].y + z * basis[2].y
-        rz = x * basis[0].z + y * basis[1].z + z * basis[2].z
+        rx = x * basis.b0.x + y * basis.b1.x + z * basis.b2.x
+        ry = x * basis.b0.y + y * basis.b1.y + z * basis.b2.y
+        rz = x * basis.b0.z + y * basis.b1.z + z * basis.b2.z
 
         raydir = Vec.new(rx, ry, rz)
         ray = Ray.new(p0, raydir)
 
         occisect = Isect.new
-        @spheres[0].intersect(ray, occisect)
-        @spheres[1].intersect(ray, occisect)
-        @spheres[2].intersect(ray, occisect)
+        @s0.intersect(ray, occisect)
+        @s1.intersect(ray, occisect)
+        @s2.intersect(ray, occisect)
         @plane.intersect(ray, occisect)
         if occisect.hit
           occlusion = occlusion + 1.0
@@ -277,9 +290,9 @@ class Scene
             ray = Ray.new(Vec.new(0.0, 0.0, 0.0), eye)
 
             isect = Isect.new
-            @spheres[0].intersect(ray, isect)
-            @spheres[1].intersect(ray, isect)
-            @spheres[2].intersect(ray, isect)
+            @s0.intersect(ray, isect)
+            @s1.intersect(ray, isect)
+            @s2.intersect(ray, isect)
             @plane.intersect(ray, isect)
             if isect.hit
               col = ambient_occlusion(isect)
