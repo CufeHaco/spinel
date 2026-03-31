@@ -1,12 +1,12 @@
-#!/usr/bin/env ruby
+#!/bin/sh
 # Spinel AOT Compiler - Ruby to native binary
 #
 # Usage:
-#   spinel app.rb                  → compiles to ./app
-#   spinel app.rb -o myapp         → compiles to ./myapp
-#   spinel app.rb -c               → generate C only (app.c)
-#   spinel app.rb -c -o app.c      → generate C to specific file
-#   spinel app.rb -S               → print C to stdout
+#   spinel app.rb                  - compiles to ./app
+#   spinel app.rb -o myapp         - compiles to ./myapp
+#   spinel app.rb -c               - generate C only (app.c)
+#   spinel app.rb -c -o app.c     - generate C to specific file
+#   spinel app.rb -S               - print C to stdout
 #
 # Options:
 #   -o FILE    Output file (binary or C depending on -c)
@@ -16,126 +16,111 @@
 #   --cc=CMD   C compiler command (default: cc)
 #   --lonig    Link with oniguruma (for regexp programs)
 
-require "tempfile"
+DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
+PARSE_RB="$DIR/spinel_parse.rb"
+PARSE_BIN="$DIR/spinel_parse_bin"
+CODEGEN_RB="$DIR/spinel_codegen.rb"
+CODEGEN_BIN="$DIR/spinel_codegen"
 
-dir = File.dirname(File.realpath(__FILE__))
-parse_rb = File.join(dir, "spinel_parse.rb")
-parse_bin = File.join(dir, "spinel_parse_bin")  # compiled parser (C + libprism)
-codegen_rb = File.join(dir, "spinel_codegen.rb")
-codegen_bin = File.join(dir, "spinel_codegen")  # compiled binary
+SOURCE=""
+OUTPUT=""
+C_ONLY=0
+STDOUT_MODE=0
+OPT_LEVEL="2"
+CC_CMD="cc"
+EXTRA_FLAGS=""
 
-source = nil
-output = nil
-c_only = false
-stdout_mode = false
-opt_level = "2"
-cc_cmd = "cc"
-extra_flags = []
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source=*) SOURCE="${1#--source=}" ;;
+    --output=*) OUTPUT="${1#--output=}" ;;
+    --cc=*)     CC_CMD="${1#--cc=}" ;;
+    -o)         shift; OUTPUT="$1" ;;
+    -O)         shift; OPT_LEVEL="$1" ;;
+    -c)         C_ONLY=1 ;;
+    -S)         STDOUT_MODE=1 ;;
+    --lonig)    EXTRA_FLAGS="$EXTRA_FLAGS -lonig" ;;
+    *.rb)       [ -z "$SOURCE" ] && SOURCE="$1" ;;
+  esac
+  shift
+done
 
-i = 0
-while i < ARGV.length
-  arg = ARGV[i]
-  if arg.start_with?("--source=")
-    source = arg.sub("--source=", "")
-  elsif arg.start_with?("--output=")
-    output = arg.sub("--output=", "")
-  elsif arg.start_with?("--cc=")
-    cc_cmd = arg.sub("--cc=", "")
-  elsif arg == "-o" && i + 1 < ARGV.length
-    i += 1
-    output = ARGV[i]
-  elsif arg == "-O" && i + 1 < ARGV.length
-    i += 1
-    opt_level = ARGV[i]
-  elsif arg == "-c"
-    c_only = true
-  elsif arg == "-S"
-    stdout_mode = true
-  elsif arg == "--lonig"
-    extra_flags << "-lonig"
-  elsif arg.end_with?(".rb") && source.nil?
-    source = arg
-  end
-  i += 1
-end
-
-unless source
-  $stderr.puts "Spinel AOT Compiler"
-  $stderr.puts ""
-  $stderr.puts "Usage: spinel app.rb              → compile to ./app"
-  $stderr.puts "       spinel app.rb -o myapp     → compile to ./myapp"
-  $stderr.puts "       spinel app.rb -c           → generate app.c only"
-  $stderr.puts "       spinel app.rb -S           → print C to stdout"
-  $stderr.puts ""
-  $stderr.puts "Options:"
-  $stderr.puts "  -o FILE     Output file"
-  $stderr.puts "  -c          C source only (don't compile)"
-  $stderr.puts "  -S          Print C to stdout"
-  $stderr.puts "  -O LEVEL    Optimization level (default: 2)"
-  $stderr.puts "  --cc=CMD    C compiler (default: cc)"
-  $stderr.puts "  --lonig     Link with oniguruma (regexp)"
+if [ -z "$SOURCE" ]; then
+  echo "Spinel AOT Compiler" >&2
+  echo "" >&2
+  echo "Usage: spinel app.rb              - compile to ./app" >&2
+  echo "       spinel app.rb -o myapp     - compile to ./myapp" >&2
+  echo "       spinel app.rb -c           - generate app.c only" >&2
+  echo "       spinel app.rb -S           - print C to stdout" >&2
+  echo "" >&2
+  echo "Options:" >&2
+  echo "  -o FILE     Output file" >&2
+  echo "  -c          C source only (don't compile)" >&2
+  echo "  -S          Print C to stdout" >&2
+  echo "  -O LEVEL    Optimization level (default: 2)" >&2
+  echo "  --cc=CMD    C compiler (default: cc)" >&2
+  echo "  --lonig     Link with oniguruma (regexp)" >&2
   exit 1
-end
+fi
 
-unless File.exist?(source)
-  $stderr.puts "spinel: #{source}: No such file"
+if [ ! -f "$SOURCE" ]; then
+  echo "spinel: $SOURCE: No such file" >&2
   exit 1
-end
+fi
 
-basename = File.basename(source, ".rb")
+BASENAME="$(basename "$SOURCE" .rb)"
+AST_TMP="$(mktemp /tmp/spinel_ast.XXXXXX)"
+trap 'rm -f "$AST_TMP" "$C_TMP"' EXIT
 
 # Step 1: Parse (use compiled parser if available, else CRuby + Prism)
-ast_tmp = Tempfile.new(["spinel_ast", ".txt"])
-if File.executable?(parse_bin)
-  system(parse_bin, source, ast_tmp.path)
+if [ -x "$PARSE_BIN" ]; then
+  "$PARSE_BIN" "$SOURCE" "$AST_TMP"
 else
-  system("ruby", parse_rb, source, out: ast_tmp.path)
-end
-unless $?.success?
-  $stderr.puts "spinel: parse failed"
-  ast_tmp.close; ast_tmp.unlink
+  ruby "$PARSE_RB" "$SOURCE" > "$AST_TMP"
+fi
+if [ $? -ne 0 ]; then
+  echo "spinel: parse failed" >&2
   exit 1
-end
+fi
 
-# Step 2: Codegen (use compiled binary if available, else CRuby)
-if stdout_mode
-  c_file = nil
-  if File.executable?(codegen_bin)
-    system(codegen_bin, ast_tmp.path)
+# Step 2: Codegen
+if [ $STDOUT_MODE -eq 1 ]; then
+  if [ -x "$CODEGEN_BIN" ]; then
+    "$CODEGEN_BIN" "$AST_TMP"
   else
-    system("ruby", codegen_rb, ast_tmp.path)
-  end
-  ast_tmp.close; ast_tmp.unlink
-  exit($?.success? ? 0 : 1)
-end
+    ruby "$CODEGEN_RB" "$AST_TMP"
+  fi
+  exit $?
+fi
 
-c_file = c_only ? (output || "#{basename}.c") : Tempfile.new(["spinel_out", ".c"]).path
-if File.executable?(codegen_bin)
-  system(codegen_bin, ast_tmp.path, c_file)
+if [ $C_ONLY -eq 1 ]; then
+  C_FILE="${OUTPUT:-$BASENAME.c}"
 else
-  system("ruby", codegen_rb, ast_tmp.path, c_file)
-end
-ast_tmp.close; ast_tmp.unlink
+  C_TMP="$(mktemp /tmp/spinel_out.XXXXXX.c)"
+  C_FILE="$C_TMP"
+fi
 
-unless $?.success?
-  $stderr.puts "spinel: codegen failed"
+if [ -x "$CODEGEN_BIN" ]; then
+  "$CODEGEN_BIN" "$AST_TMP" "$C_FILE"
+else
+  ruby "$CODEGEN_RB" "$AST_TMP" "$C_FILE"
+fi
+if [ $? -ne 0 ]; then
+  echo "spinel: codegen failed" >&2
   exit 1
-end
+fi
 
-if c_only
-  $stderr.puts "Wrote #{c_file}"
+if [ $C_ONLY -eq 1 ]; then
+  echo "Wrote $C_FILE" >&2
   exit 0
-end
+fi
 
-# Step 3: Compile C → binary
-bin_file = output || basename
-cc_args = [cc_cmd, "-O#{opt_level}", "-Wno-all", c_file, "-lm"] + extra_flags + ["-o", bin_file]
-system(*cc_args)
-File.delete(c_file) if $?.success? && !c_only
-
-unless $?.success?
-  $stderr.puts "spinel: C compilation failed"
+# Step 3: Compile C -> binary
+BIN_FILE="${OUTPUT:-$BASENAME}"
+$CC_CMD -O${OPT_LEVEL} -Wno-all "$C_FILE" -lm $EXTRA_FLAGS -o "$BIN_FILE"
+if [ $? -ne 0 ]; then
+  echo "spinel: C compilation failed" >&2
   exit 1
-end
+fi
 
-$stderr.puts "#{source} → #{bin_file}"
+echo "$SOURCE -> $BIN_FILE" >&2
