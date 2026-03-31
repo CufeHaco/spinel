@@ -1114,6 +1114,9 @@ class Compiler
         if lt == "string"
           return "string"
         end
+        if lt == "mutable_str"
+          return "string"
+        end
         if lt == "poly"
           return "poly"
         end
@@ -1196,6 +1199,15 @@ class Compiler
               return "float"
             end
           end
+        end
+      end
+      return "int"
+    end
+    if mname == "<<"
+      if recv >= 0
+        lt = infer_type(recv)
+        if lt == "mutable_str"
+          return "mutable_str"
         end
       end
       return "int"
@@ -1596,6 +1608,9 @@ class Compiler
         if rt == "string"
           return "string"
         end
+        if rt == "mutable_str"
+          return "string"
+        end
         if rt == "int_array"
           return "int"
         end
@@ -1965,6 +1980,9 @@ class Compiler
     if t == "lambda"
       return 1
     end
+    if t == "mutable_str"
+      return 1
+    end
     if is_obj_type(t) == 1
       return 1
     end
@@ -1987,6 +2005,9 @@ class Compiler
     end
     if t == "string"
       return "const char *"
+    end
+    if t == "mutable_str"
+      return "sp_String *"
     end
     if t == "void"
       return "mrb_int"
@@ -2046,6 +2067,9 @@ class Compiler
     end
     if t == "string"
       return "\"\""
+    end
+    if t == "mutable_str"
+      return "NULL"
     end
     if t == "void"
       return "0"
@@ -5847,6 +5871,17 @@ class Compiler
       end
       emit_string_helpers
     end
+    if @needs_mutable_str == 1
+      if @needs_gc == 0
+        @needs_gc = 1
+        emit_gc_runtime
+      end
+      if @needs_string_helpers == 0
+        @needs_string_helpers = 1
+        emit_string_helpers
+      end
+      emit_mutable_str_runtime
+    end
     if @needs_rb_value == 1
       if @needs_string_helpers == 0
         @needs_string_helpers = 1
@@ -5950,7 +5985,8 @@ class Compiler
     emit_raw("static void sp_gc_cleanup(int*p){sp_gc_nroots=*p;}")
     emit_raw("static void sp_gc_mark_stack(void){volatile char dummy;char*sp=(char*)&dummy;char*lo=sp,*hi=sp_gc_stack_bottom;if(lo>hi){char*t=lo;lo=hi;hi=t;}for(sp_gc_hdr*h=sp_gc_heap;h;h=h->next){void*obj=(char*)h+sizeof(sp_gc_hdr);void**p=(void**)lo;while((char*)p<hi){if(*p==obj){sp_gc_mark(obj);break;}p++;}}}")
     emit_raw("static void sp_gc_collect(void){for(int i=0;i<sp_gc_nroots;i++){void*obj=*sp_gc_roots[i];if(obj)sp_gc_mark(obj);}sp_gc_mark_stack();sp_gc_hdr**pp=&sp_gc_heap;sp_gc_bytes=0;while(*pp){sp_gc_hdr*h=*pp;if(!h->marked){*pp=h->next;if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}else{h->marked=0;sp_gc_bytes+=h->size;pp=&h->next;}}}")
-    emit_raw("static void*sp_gc_alloc(size_t sz,void(*fin)(void*),void(*scn)(void*)){if(sp_gc_bytes>sp_gc_threshold){sp_gc_collect();if(sp_gc_bytes>sp_gc_threshold/2)sp_gc_threshold*=2;}sp_gc_hdr*h=(sp_gc_hdr*)calloc(1,sizeof(sp_gc_hdr)+sz);h->finalize=fin;h->scan=scn;h->size=sizeof(sp_gc_hdr)+sz;h->next=sp_gc_heap;sp_gc_heap=h;sp_gc_bytes+=sizeof(sp_gc_hdr)+sz;return(char*)h+sizeof(sp_gc_hdr);}")
+    emit_raw("static size_t sp_gc_threshold_init=256*1024;")
+    emit_raw("static void*sp_gc_alloc(size_t sz,void(*fin)(void*),void(*scn)(void*)){if(sp_gc_bytes>sp_gc_threshold){size_t before=sp_gc_bytes;sp_gc_collect();if(sp_gc_bytes>sp_gc_threshold/2){sp_gc_threshold*=2;}else{size_t nt=sp_gc_bytes*4;if(nt<sp_gc_threshold_init)nt=sp_gc_threshold_init;if(nt>sp_gc_threshold)sp_gc_threshold=nt;}}sp_gc_hdr*h=(sp_gc_hdr*)calloc(1,sizeof(sp_gc_hdr)+sz);h->finalize=fin;h->scan=scn;h->size=sizeof(sp_gc_hdr)+sz;h->next=sp_gc_heap;sp_gc_heap=h;sp_gc_bytes+=sizeof(sp_gc_hdr)+sz;return(char*)h+sizeof(sp_gc_hdr);}")
     emit_raw("")
   end
 
@@ -5960,13 +5996,15 @@ class Compiler
     emit_raw("static sp_IntArray*sp_IntArray_new(void){sp_IntArray*a=(sp_IntArray*)sp_gc_alloc(sizeof(sp_IntArray),sp_IntArray_fin,NULL);a->cap=16;a->data=(mrb_int*)malloc(sizeof(mrb_int)*a->cap);a->start=0;a->len=0;{sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));h->size+=sizeof(mrb_int)*a->cap;sp_gc_bytes+=sizeof(mrb_int)*a->cap;}return a;}")
     emit_raw("static sp_IntArray*sp_IntArray_from_range(mrb_int s,mrb_int e){sp_IntArray*a=sp_IntArray_new();mrb_int n=e-s+1;if(n<0)n=0;if(n>a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes-=sizeof(mrb_int)*a->cap;h->size-=sizeof(mrb_int)*a->cap;a->cap=n;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);h->size+=sizeof(mrb_int)*a->cap;sp_gc_bytes+=sizeof(mrb_int)*a->cap;}for(mrb_int i=0;i<n;i++)a->data[i]=s+i;a->len=n;return a;}")
     emit_raw("static sp_IntArray*sp_IntArray_dup(sp_IntArray*a){sp_IntArray*b=sp_IntArray_new();if(a->len>b->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)b-sizeof(sp_gc_hdr));sp_gc_bytes-=sizeof(mrb_int)*b->cap;h->size-=sizeof(mrb_int)*b->cap;b->cap=a->len;b->data=(mrb_int*)realloc(b->data,sizeof(mrb_int)*b->cap);h->size+=sizeof(mrb_int)*b->cap;sp_gc_bytes+=sizeof(mrb_int)*b->cap;}memcpy(b->data,a->data+a->start,sizeof(mrb_int)*a->len);b->len=a->len;return b;}")
-    emit_raw("static inline void sp_IntArray_push(sp_IntArray*a,mrb_int v){mrb_int e=a->start+a->len;if(e>=a->cap){if(a->start>0){memmove(a->data,a->data+a->start,sizeof(mrb_int)*a->len);a->start=0;e=a->len;}if(e>=a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes-=sizeof(mrb_int)*a->cap;h->size-=sizeof(mrb_int)*a->cap;a->cap=a->cap*2+1;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);h->size+=sizeof(mrb_int)*a->cap;sp_gc_bytes+=sizeof(mrb_int)*a->cap;}}a->data[e]=v;a->len++;}")
+    emit_raw("static void __attribute__((noinline)) sp_IntArray_push_grow(sp_IntArray*a){if(a->start>0){memmove(a->data,a->data+a->start,sizeof(mrb_int)*a->len);a->start=0;if(a->len<a->cap)return;}a->cap=a->cap*2+1;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);}")
+    emit_raw("static inline void sp_IntArray_push(sp_IntArray*a,mrb_int v){if(a->start+a->len>=a->cap)sp_IntArray_push_grow(a);a->data[a->start+a->len]=v;a->len++;}")
     emit_raw("static inline mrb_int sp_IntArray_pop(sp_IntArray*a){return a->data[a->start+--a->len];}")
     emit_raw("static inline mrb_int sp_IntArray_shift(sp_IntArray*a){mrb_int v=a->data[a->start];a->start++;a->len--;return v;}")
     emit_raw("static inline mrb_int sp_IntArray_length(sp_IntArray*a){return a->len;}")
     emit_raw("static inline mrb_bool sp_IntArray_empty(sp_IntArray*a){return a->len==0;}")
     emit_raw("static inline mrb_int sp_IntArray_get(sp_IntArray*a,mrb_int i){if(i<0)i+=a->len;return a->data[a->start+i];}")
-    emit_raw("static inline void sp_IntArray_set(sp_IntArray*a,mrb_int i,mrb_int v){if(i<0)i+=a->len;if(i>=0&&i<a->len){a->data[a->start+i]=v;return;}{sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));while(a->start+i>=a->cap){sp_gc_bytes-=sizeof(mrb_int)*a->cap;h->size-=sizeof(mrb_int)*a->cap;a->cap=a->cap*2+1;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);h->size+=sizeof(mrb_int)*a->cap;sp_gc_bytes+=sizeof(mrb_int)*a->cap;}}while(i>=a->len){a->data[a->start+a->len]=0;a->len++;}a->data[a->start+i]=v;}")
+    emit_raw("static void sp_IntArray_set_slow(sp_IntArray*a,mrb_int i,mrb_int v){while(a->start+i>=a->cap){a->cap=a->cap*2+1;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);}while(i>=a->len){a->data[a->start+a->len]=0;a->len++;}a->data[a->start+i]=v;}")
+    emit_raw("static inline void sp_IntArray_set(sp_IntArray*a,mrb_int i,mrb_int v){if(i<0)i+=a->len;if(i>=0&&i<a->len){a->data[a->start+i]=v;return;}sp_IntArray_set_slow(a,i,v);}")
     emit_raw("static void sp_IntArray_reverse_bang(sp_IntArray*a){for(mrb_int i=0,j=a->len-1;i<j;i++,j--){mrb_int t=a->data[a->start+i];a->data[a->start+i]=a->data[a->start+j];a->data[a->start+j]=t;}}")
     emit_raw("static int _sp_int_cmp(const void*a,const void*b){mrb_int va=*(const mrb_int*)a,vb=*(const mrb_int*)b;return(va>vb)-(va<vb);}")
     emit_raw("static sp_IntArray*sp_IntArray_sort(sp_IntArray*a){sp_IntArray*b=sp_IntArray_dup(a);qsort(b->data+b->start,b->len,sizeof(mrb_int),_sp_int_cmp);return b;}")
@@ -5976,7 +6014,7 @@ class Compiler
     emit_raw("static mrb_int sp_IntArray_sum(sp_IntArray*a){mrb_int s=0;for(mrb_int i=0;i<a->len;i++)s+=a->data[a->start+i];return s;}")
     emit_raw("static mrb_bool sp_IntArray_include(sp_IntArray*a,mrb_int v){for(mrb_int i=0;i<a->len;i++)if(a->data[a->start+i]==v)return TRUE;return FALSE;}")
     emit_raw("static sp_IntArray*sp_IntArray_uniq(sp_IntArray*a){sp_IntArray*b=sp_IntArray_new();for(mrb_int i=0;i<a->len;i++){int found=0;for(mrb_int j=0;j<b->len;j++){if(b->data[b->start+j]==a->data[a->start+i]){found=1;break;}}if(!found)sp_IntArray_push(b,a->data[a->start+i]);}return b;}")
-    emit_raw("static void sp_IntArray_unshift(sp_IntArray*a,mrb_int v){if(a->start>0){a->start--;a->data[a->start]=v;a->len++;}else{mrb_int e=a->len+1;if(e>a->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes-=sizeof(mrb_int)*a->cap;h->size-=sizeof(mrb_int)*a->cap;a->cap=a->cap*2+1;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);h->size+=sizeof(mrb_int)*a->cap;sp_gc_bytes+=sizeof(mrb_int)*a->cap;}memmove(a->data+1,a->data,sizeof(mrb_int)*a->len);a->data[0]=v;a->len++;}}")
+    emit_raw("static void sp_IntArray_unshift(sp_IntArray*a,mrb_int v){if(a->start>0){a->start--;a->data[a->start]=v;a->len++;}else{mrb_int e=a->len+1;if(e>a->cap){a->cap=a->cap*2+1;a->data=(mrb_int*)realloc(a->data,sizeof(mrb_int)*a->cap);}memmove(a->data+1,a->data,sizeof(mrb_int)*a->len);a->data[0]=v;a->len++;}}")
     emit_raw("static const char*sp_IntArray_join(sp_IntArray*a,const char*sep){size_t sl=strlen(sep),cap=256;char*buf=(char*)malloc(cap);size_t len=0;for(mrb_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}char tmp[32];int n=snprintf(tmp,32,\"%lld\",(long long)a->data[a->start+i]);if(len+n>=cap){cap*=2;buf=(char*)realloc(buf,cap);}memcpy(buf+len,tmp,n);len+=n;}buf[len]=0;return buf;}")
     emit_raw("static mrb_bool sp_IntArray_eq(sp_IntArray*a,sp_IntArray*b){if(a->len!=b->len)return FALSE;for(mrb_int i=0;i<a->len;i++)if(a->data[a->start+i]!=b->data[b->start+i])return FALSE;return TRUE;}")
     emit_raw("")
@@ -6070,6 +6108,17 @@ class Compiler
     emit_raw("static const char*sp_str_lstrip(const char*s){while(*s&&isspace((unsigned char)*s))s++;char*r=(char*)malloc(strlen(s)+1);strcpy(r,s);return r;}")
     emit_raw("static const char*sp_str_rstrip(const char*s){size_t l=strlen(s);while(l>0&&isspace((unsigned char)s[l-1]))l--;char*r=(char*)malloc(l+1);memcpy(r,s,l);r[l]=0;return r;}")
     emit_raw("static const char*sp_str_dup(const char*s){char*r=(char*)malloc(strlen(s)+1);strcpy(r,s);return r;}")
+    emit_raw("")
+  end
+
+  def emit_mutable_str_runtime
+    emit_raw("typedef struct{char*data;int64_t len;int64_t cap;}sp_String;")
+    emit_raw("static void sp_String_fin(void*p){free(((sp_String*)p)->data);}")
+    emit_raw("static sp_String*sp_String_new(const char*s){sp_String*r=(sp_String*)sp_gc_alloc(sizeof(sp_String),sp_String_fin,NULL);r->len=(int64_t)strlen(s);r->cap=r->len*2+16;r->data=(char*)malloc(r->cap+1);memcpy(r->data,s,r->len+1);{sp_gc_hdr*h=(sp_gc_hdr*)((char*)r-sizeof(sp_gc_hdr));h->size+=r->cap+1;sp_gc_bytes+=r->cap+1;}return r;}")
+    emit_raw("static inline void sp_String_append(sp_String*s,const char*t){int64_t tl=(int64_t)strlen(t);if(s->len+tl>=s->cap){sp_gc_hdr*h=(sp_gc_hdr*)((char*)s-sizeof(sp_gc_hdr));sp_gc_bytes-=s->cap+1;h->size-=s->cap+1;s->cap=(s->len+tl)*2+16;s->data=(char*)realloc(s->data,s->cap+1);h->size+=s->cap+1;sp_gc_bytes+=s->cap+1;}memcpy(s->data+s->len,t,tl+1);s->len+=tl;}")
+    emit_raw("static inline const char*sp_String_cstr(sp_String*s){return s->data;}")
+    emit_raw("static inline int64_t sp_String_length(sp_String*s){return s->len;}")
+    emit_raw("static sp_String*sp_String_dup(sp_String*s){return sp_String_new(s->data);}")
     emit_raw("")
   end
 
@@ -7346,6 +7395,27 @@ class Compiler
         end
       end
     end
+    # Detect << on string local variable: widen to mutable_str
+    if @nd_type[nid] == "CallNode"
+      if @nd_name[nid] == "<<"
+        recv = @nd_receiver[nid]
+        if recv >= 0
+          if @nd_type[recv] == "LocalVariableReadNode"
+            vname = @nd_name[recv]
+            wi = 0
+            while wi < names.length
+              if names[wi] == vname
+                if types[wi] == "string"
+                  types[wi] = "mutable_str"
+                  @needs_mutable_str = 1
+                end
+              end
+              wi = wi + 1
+            end
+          end
+        end
+      end
+    end
     # Block parameters need to be declared as locals
     if @nd_type[nid] == "CallNode"
       blk = @nd_block[nid]
@@ -8251,6 +8321,24 @@ class Compiler
       end
     end
 
+    # Mutable string methods: delegate to string methods via ->data
+    if recv_type == "mutable_str"
+      if mname == "length" || mname == "size"
+        return "sp_String_length(" + rc + ")"
+      end
+      if mname == "dup"
+        return "sp_String_dup(" + rc + ")"
+      end
+      if mname == "to_s"
+        return rc + "->data"
+      end
+      # For all other string methods, convert via ->data
+      r = compile_string_method_expr(nid, mname, rc + "->data")
+      if r != ""
+        return r
+      end
+    end
+
     # Range methods
     if recv_type == "range"
       r = compile_range_method_expr(nid, mname, rc)
@@ -8707,6 +8795,10 @@ class Compiler
     end
     if mname == "+"
       lt = infer_type(recv)
+      if lt == "mutable_str"
+        @needs_string_helpers = 1
+        return "sp_str_concat(" + compile_expr(recv) + "->data, " + compile_arg0(nid) + ")"
+      end
       if lt == "string"
         @needs_string_helpers = 1
         return "sp_str_concat(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
@@ -8795,6 +8887,12 @@ class Compiler
     end
     if mname == "<<"
       lt = infer_type(recv)
+      if lt == "mutable_str"
+        @needs_mutable_str = 1
+        rc = compile_expr(recv)
+        val = compile_arg0(nid)
+        return "(sp_String_append(" + rc + ", " + val + "), " + rc + ")"
+      end
       if lt == "string"
         @needs_string_helpers = 1
         return "sp_str_concat(" + compile_expr(recv) + ", " + compile_arg0(nid) + ")"
@@ -10631,6 +10729,16 @@ class Compiler
         emit("  lv_" + lname + " = " + box_expr_to_poly(@nd_expression[nid]) + ";")
         return
       end
+      if vt == "mutable_str"
+        rhs_type = infer_type(@nd_expression[nid])
+        val = compile_expr(@nd_expression[nid])
+        if rhs_type == "string" || rhs_type == "int"
+          emit("  lv_" + lname + " = sp_String_new(" + val + ");")
+        else
+          emit("  lv_" + lname + " = " + val + ";")
+        end
+        return
+      end
       val = compile_expr(@nd_expression[nid])
       emit("  lv_" + lname + " = " + val + ";")
       set_var_type(lname, infer_type(@nd_expression[nid]))
@@ -11347,6 +11455,28 @@ class Compiler
     if mname == "<<"
       if recv >= 0
         rt = infer_type(recv)
+        if rt == "mutable_str"
+          @needs_mutable_str = 1
+          rc = compile_expr(recv)
+          arg = @nd_arguments[nid]
+          if arg >= 0
+            argl = parse_id_list(@nd_args[arg])
+            if argl.length > 0
+              at = infer_type(argl[0])
+              val = compile_expr(argl[0])
+              if at == "int"
+                emit("  sp_String_append(" + rc + ", sp_int_to_s(" + val + "));")
+              else
+                if at == "mutable_str"
+                  emit("  sp_String_append(" + rc + ", " + val + "->data);")
+                else
+                  emit("  sp_String_append(" + rc + ", " + val + ");")
+                end
+              end
+            end
+          end
+          return 1
+        end
         if rt == "string"
           @needs_string_helpers = 1
           rc = compile_expr(recv)
@@ -11368,6 +11498,12 @@ class Compiler
     if mname == "replace"
       if recv >= 0
         rt = infer_type(recv)
+        if rt == "mutable_str"
+          rc = compile_expr(recv)
+          val = compile_arg0(nid)
+          emit("  " + rc + "->len = 0; " + rc + "->data[0] = 0; sp_String_append(" + rc + ", " + val + ");")
+          return 1
+        end
         if rt == "string"
           val = compile_arg0(nid)
           if @nd_type[recv] == "LocalVariableReadNode"
@@ -11386,6 +11522,11 @@ class Compiler
     if mname == "clear"
       if recv >= 0
         rt = infer_type(recv)
+        if rt == "mutable_str"
+          rc = compile_expr(recv)
+          emit("  " + rc + "->len = 0; " + rc + "->data[0] = 0;")
+          return 1
+        end
         if rt == "string"
           if @nd_type[recv] == "LocalVariableReadNode"
             emit("  lv_" + @nd_name[recv] + " = \"\";")
@@ -12335,6 +12476,11 @@ class Compiler
         k = k + 1
         next
       end
+      if at == "mutable_str"
+        emit("  { const char *_ps = " + val + "->data; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+        k = k + 1
+        next
+      end
       if at == "int"
         emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
       else
@@ -12420,10 +12566,14 @@ class Compiler
       if at == "int"
         emit("  printf(\"%lld\", (long long)" + val + ");")
       else
-        if at == "string"
-          emit("  fputs(" + val + ", stdout);")
+        if at == "mutable_str"
+          emit("  fputs(" + val + "->data, stdout);")
         else
-          emit("  printf(\"%lld\", (long long)" + val + ");")
+          if at == "string"
+            emit("  fputs(" + val + ", stdout);")
+          else
+            emit("  printf(\"%lld\", (long long)" + val + ");")
+          end
         end
       end
       k = k + 1
