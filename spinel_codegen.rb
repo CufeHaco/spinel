@@ -1233,6 +1233,12 @@ class Compiler
     if mname == "%"
       return "int"
     end
+    if mname == "-@"
+      if recv >= 0
+        return infer_type(recv)
+      end
+      return "int"
+    end
     ""
   end
 
