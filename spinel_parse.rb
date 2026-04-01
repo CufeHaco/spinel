@@ -22,6 +22,7 @@ require "prism"
 def resolve_requires(source, source_path)
   base_dir = File.dirname(File.expand_path(source_path))
   resolved = source.dup
+  # require_relative
   resolved.gsub!(/^require_relative\s+["'](.+?)["']\s*$/) do
     rel_path = $1
     req_file = File.join(base_dir, rel_path)
@@ -33,7 +34,39 @@ def resolve_requires(source, source_path)
       "# require_relative not found: #{rel_path}"
     end
   end
+  # require "name" — search in lib/ directory
+  lib_dir = File.join(File.dirname(__FILE__), "lib")
+  resolved.gsub!(/^require\s+["'](.+?)["']\s*$/) do
+    lib_name = $1
+    lib_file = File.join(lib_dir, lib_name)
+    lib_file += ".rb" unless lib_file.end_with?(".rb")
+    if File.exist?(lib_file)
+      content = File.read(lib_file)
+      resolve_requires(content, lib_file)
+    else
+      "# require not resolved: #{lib_name}"
+    end
+  end
   resolved
+end
+
+def rewrite_syntax_sugar(source)
+  result = source.dup
+  # &:symbol → block: .map(&:to_s) → .map { |_x| _x.to_s }
+  result.gsub!(/(\.\w+[!?]?)\s*\(\s*&:(\w+[?!]?)\s*\)/) { "#{$1} { |_spx| _spx.#{$2} }" }
+  result.gsub!(/(\.\w+[!?]?)\s+&:(\w+[?!]?)/) { "#{$1} { |_spx| _spx.#{$2} }" }
+  # send(:method, args) → method(args)
+  # Matches :name (word), :+ :- :* :/ :<< :>> :<=> :== :< :> etc.
+  result.gsub!(/\.send\s*\(\s*:([\w!?]+|[+\-*\/<>=!&|^~%]+)(?:\s*,\s*)?(.*?)\)$/m) do
+    mname = $1
+    args = $2.strip
+    if args.empty?
+      ".#{mname}"
+    else
+      ".#{mname}(#{args})"
+    end
+  end
+  result
 end
 
 def serialize_node(node)
@@ -704,6 +737,7 @@ end
 
 source = File.read(source_file)
 source = resolve_requires(source, source_file)
+source = rewrite_syntax_sugar(source)
 result = Prism.parse(source)
 ast = serialize_node(result.value)
 
