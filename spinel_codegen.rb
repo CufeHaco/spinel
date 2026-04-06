@@ -10981,43 +10981,52 @@ class Compiler
       end
     end
     if lt == "bigint"
+      # Root operands in temp vars to prevent GC collection during nested ops
       rc_raw = compile_expr(recv)
-      rc = infer_type(recv) == "bigint" ? rc_raw : "sp_bigint_new_int(" + rc_raw + ")"
+      rc_tmp = new_temp
+      if infer_type(recv) == "bigint"
+        emit("  sp_Bigint *" + rc_tmp + " = " + rc_raw + ";")
+      else
+        emit("  sp_Bigint *" + rc_tmp + " = sp_bigint_new_int(" + rc_raw + ");")
+      end
+      arg_tmp = new_temp
+      arg_val = compile_bigint_arg(nid)
+      emit("  sp_Bigint *" + arg_tmp + " = " + arg_val + ";")
       if mname == "+"
-        return "sp_bigint_add(" + rc + ", " + compile_bigint_arg(nid) + ")"
+        return "sp_bigint_add(" + rc_tmp + ", " + arg_tmp + ")"
       end
       if mname == "-"
-        return "sp_bigint_sub(" + rc + ", " + compile_bigint_arg(nid) + ")"
+        return "sp_bigint_sub(" + rc_tmp + ", " + arg_tmp + ")"
       end
       if mname == "*"
-        return "sp_bigint_mul(" + rc + ", " + compile_bigint_arg(nid) + ")"
+        return "sp_bigint_mul(" + rc_tmp + ", " + arg_tmp + ")"
       end
       if mname == "/"
-        return "sp_bigint_div(" + rc + ", " + compile_bigint_arg(nid) + ")"
+        return "sp_bigint_div(" + rc_tmp + ", " + arg_tmp + ")"
       end
       if mname == "%"
-        return "sp_bigint_mod(" + rc + ", " + compile_bigint_arg(nid) + ")"
+        return "sp_bigint_mod(" + rc_tmp + ", " + arg_tmp + ")"
       end
       if mname == "**"
-        return "sp_bigint_pow(" + rc + ", " + compile_arg0(nid) + ")"
+        return "sp_bigint_pow(" + rc_tmp + ", " + compile_arg0(nid) + ")"
       end
       if mname == ">"
-        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") > 0)"
+        return "(sp_bigint_cmp(" + rc_tmp + ", " + arg_tmp + ") > 0)"
       end
       if mname == "<"
-        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") < 0)"
+        return "(sp_bigint_cmp(" + rc_tmp + ", " + arg_tmp + ") < 0)"
       end
       if mname == ">="
-        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") >= 0)"
+        return "(sp_bigint_cmp(" + rc_tmp + ", " + arg_tmp + ") >= 0)"
       end
       if mname == "<="
-        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") <= 0)"
+        return "(sp_bigint_cmp(" + rc_tmp + ", " + arg_tmp + ") <= 0)"
       end
       if mname == "=="
-        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") == 0)"
+        return "(sp_bigint_cmp(" + rc_tmp + ", " + arg_tmp + ") == 0)"
       end
       if mname == "!="
-        return "(sp_bigint_cmp(" + rc + ", " + compile_bigint_arg(nid) + ") != 0)"
+        return "(sp_bigint_cmp(" + rc_tmp + ", " + arg_tmp + ") != 0)"
       end
     end
     # Operators
