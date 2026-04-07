@@ -4,8 +4,8 @@
 #   make              Build everything (parser + bootstrap compiler)
 #   make parse        Build C parser only
 #   make bootstrap    Bootstrap the compiler backend
-#   make test         Run all tests
-#   make bench        Run all benchmarks
+#   make test         Run feature tests (requires bootstrap first)
+#   make bench        Run benchmarks (requires bootstrap first)
 #   make clean        Remove built binaries
 
 CC       ?= cc
@@ -83,7 +83,8 @@ build/sp_bigint.o: lib/sp_bigint.c lib/sp_bigint.h lib/mruby_shim.h
 	@mkdir -p build
 	$(CC) -c -O2 -Wno-all -Ilib lib/sp_bigint.c -o build/sp_bigint.o
 
-test: spinel_parse spinel_codegen build/sp_bigint.o $(RE_LIB)
+test: spinel_parse build/sp_bigint.o $(RE_LIB)
+	@if [ ! -f spinel_codegen ]; then echo "Run 'make bootstrap' first"; exit 1; fi
 	@pass=0; fail=0; err=0; \
 	for f in test/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
@@ -105,7 +106,8 @@ test: spinel_parse spinel_codegen build/sp_bigint.o $(RE_LIB)
 	rm -f /tmp/_sp_t.ast /tmp/_sp_t.c /tmp/_sp_t_bin; \
 	echo "Tests: $$pass pass, $$fail fail, $$err error"
 
-bench: spinel_parse spinel_codegen build/sp_bigint.o $(RE_LIB)
+bench: spinel_parse build/sp_bigint.o $(RE_LIB)
+	@if [ ! -f spinel_codegen ]; then echo "Run 'make bootstrap' first"; exit 1; fi
 	@pass=0; fail=0; skip=0; \
 	for f in benchmark/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
