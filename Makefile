@@ -106,26 +106,31 @@ test: spinel_parse spinel_codegen build/sp_bigint.o $(RE_LIB)
 	echo "Tests: $$pass pass, $$fail fail, $$err error"
 
 bench: spinel_parse spinel_codegen build/sp_bigint.o $(RE_LIB)
-	@pass=0; fail=0; \
+	@pass=0; fail=0; skip=0; \
 	for f in benchmark/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
-	  ./spinel_parse "$$f" /tmp/_sp_b.ast 2>/dev/null && \
-	  ./spinel_codegen /tmp/_sp_b.ast /tmp/_sp_b.c 2>/dev/null && \
+	  timeout 10 ./spinel_parse "$$f" /tmp/_sp_b.ast 2>/dev/null && \
+	  timeout 10 ./spinel_codegen /tmp/_sp_b.ast /tmp/_sp_b.c 2>/dev/null && \
 	  $(CC) $(CFLAGS) /tmp/_sp_b.c build/sp_bigint.o $(RE_LIB) -lm -o /tmp/_sp_b_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 60 ruby "$$f" 2>/dev/null); \
-	    actual=$$(timeout 60 /tmp/_sp_b_bin 2>/dev/null); \
-	    if [ "$$expected" = "$$actual" ]; then \
-	      pass=$$((pass+1)); \
+	    ruby_rc=$$?; \
+	    if [ $$ruby_rc -eq 124 ]; then \
+	      echo "SKIP: $$bn (ruby timeout)"; skip=$$((skip+1)); \
 	    else \
-	      echo "FAIL: $$bn"; fail=$$((fail+1)); \
+	      actual=$$(timeout 60 /tmp/_sp_b_bin 2>/dev/null); \
+	      if [ "$$expected" = "$$actual" ]; then \
+	        pass=$$((pass+1)); \
+	      else \
+	        echo "FAIL: $$bn"; fail=$$((fail+1)); \
+	      fi; \
 	    fi; \
 	  else \
 	    echo "ERR:  $$bn"; \
 	  fi; \
 	done; \
 	rm -f /tmp/_sp_b.ast /tmp/_sp_b.c /tmp/_sp_b_bin; \
-	echo "Benchmarks: $$pass pass, $$fail fail"
+	echo "Benchmarks: $$pass pass, $$fail fail, $$skip skip"
 
 # ---- Install ----
 
