@@ -1778,7 +1778,7 @@ class Compiler
         if @nd_type[recv] == "ConstantReadNode"
           rn = @nd_name[recv]
           if rn == "Array"
-            # Check if fill value is float
+            # Check fill value type
             args_id = @nd_arguments[nid]
             if args_id >= 0
               aargs = get_args(args_id)
@@ -1786,6 +1786,9 @@ class Compiler
                 vt = infer_type(aargs[1])
                 if vt == "float"
                   return "float_array"
+                end
+                if vt == "string"
+                  return "str_array"
                 end
               end
             end
@@ -5478,7 +5481,7 @@ class Compiler
             @needs_gc = 1
             rn = @nd_name[@nd_receiver[nid]]
             if rn == "Array"
-              # Check if Array.new(n, float_val)
+              # Check fill value type for Array.new(n, val)
               args_id2 = @nd_arguments[nid]
               if args_id2 >= 0
                 aargs2 = get_args(args_id2)
@@ -5486,6 +5489,8 @@ class Compiler
                   vt2 = infer_type(aargs2[1])
                   if vt2 == "float"
                     @needs_float_array = 1
+                  elsif vt2 == "string"
+                    @needs_str_array = 1
                   else
                     @needs_int_array = 1
                   end
@@ -6625,24 +6630,95 @@ class Compiler
     end
   end
 
-  def scan_bigint_in_loop(nid, bigint_names)
+  # Scan loop for simple assignments (x = y) and store as delimited string
+  # Format: "dest1:src1,dest2:src2,..."
+  def scan_loop_assigns(nid)
     if nid < 0
       return
     end
-    # x = ... * ... pattern (any multiplication in loop → candidate for bigint)
+    if @nd_type[nid] == "LocalVariableWriteNode"
+      expr = @nd_expression[nid]
+      if expr >= 0 && @nd_type[expr] == "LocalVariableReadNode"
+        @bi_assigns = @bi_assigns + @nd_name[nid] + ":" + @nd_name[expr] + ","
+      end
+    end
+    if @nd_body[nid] >= 0
+      scan_loop_assigns(@nd_body[nid])
+    end
+    stmts = parse_id_list(@nd_stmts[nid])
+    k = 0
+    while k < stmts.length
+      scan_loop_assigns(stmts[k])
+      k = k + 1
+    end
+    if @nd_subsequent[nid] >= 0
+      scan_loop_assigns(@nd_subsequent[nid])
+    end
+  end
+
+  # Check if var_name can reach target_name via assignment chains
+  # Assignment map is stored in @bi_assigns as "dest:src,dest:src,..."
+  def bi_reaches(var_name, target_name, depth)
+    if var_name == target_name
+      return 1
+    end
+    if depth > 10
+      return 0
+    end
+    # Search for assignments where src == var_name
+    pairs = @bi_assigns.split(",")
+    i = 0
+    while i < pairs.length
+      parts = pairs[i].split(":")
+      if parts.length == 2
+        if parts[1] == var_name
+          if bi_reaches(parts[0], target_name, depth + 1) == 1
+            return 1
+          end
+        end
+      end
+      i = i + 1
+    end
+    return 0
+  end
+
+  # Check if multiplication x = a * b has unbounded growth (self-referential via assigns)
+  def mul_is_unbounded(lname, expr)
+    recv = @nd_receiver[expr]
+    if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+      op = @nd_name[recv]
+      if bi_reaches(lname, op, 0) == 1
+        return 1
+      end
+    end
+    args_id = @nd_arguments[expr]
+    if args_id != nil && args_id >= 0
+      aargs = get_args(args_id)
+      if aargs.length > 0 && @nd_type[aargs[0]] == "LocalVariableReadNode"
+        op = @nd_name[aargs[0]]
+        if bi_reaches(lname, op, 0) == 1
+          return 1
+        end
+      end
+    end
+    return 0
+  end
+
+  def scan_bigint_in_loop_node(nid, bigint_names)
+    if nid < 0
+      return
+    end
     if @nd_type[nid] == "LocalVariableWriteNode"
       lname = @nd_name[nid]
       expr = @nd_expression[nid]
-      if expr >= 0 && @nd_type[expr] == "CallNode"
-        op = @nd_name[expr]
-        if op == "*"
+      if expr >= 0 && @nd_type[expr] == "CallNode" && @nd_name[expr] == "*"
+        if mul_is_unbounded(lname, expr) == 1
           if not_in(lname, bigint_names) == 1
             bigint_names.push(lname)
           end
         end
       end
     end
-    # x *= y pattern
     if @nd_type[nid] == "LocalVariableOperatorWriteNode"
       if @nd_binop[nid] == "*"
         lname = @nd_name[nid]
@@ -6651,19 +6727,26 @@ class Compiler
         end
       end
     end
-    # Recurse into loop body
     if @nd_body[nid] >= 0
-      scan_bigint_in_loop(@nd_body[nid], bigint_names)
+      scan_bigint_in_loop_node((@nd_body[nid]), bigint_names)
     end
     stmts = parse_id_list(@nd_stmts[nid])
     k = 0
     while k < stmts.length
-      scan_bigint_in_loop(stmts[k], bigint_names)
+      scan_bigint_in_loop_node(stmts[k], bigint_names)
       k = k + 1
     end
     if @nd_subsequent[nid] >= 0
-      scan_bigint_in_loop(@nd_subsequent[nid], bigint_names)
+      scan_bigint_in_loop_node((@nd_subsequent[nid]), bigint_names)
     end
+  end
+
+  def scan_bigint_in_loop(nid, bigint_names)
+    # First pass: collect all simple assignments as delimited string
+    @bi_assigns = ""
+    scan_loop_assigns(nid)
+    # Second pass: find multiplications and check if they're unbounded
+    scan_bigint_in_loop_node(nid, bigint_names)
   end
 
   def scan_bigint_propagate(stmts, names, types)
@@ -11199,13 +11282,20 @@ class Compiler
         if args_id >= 0
           aargs = get_args(args_id)
           if aargs.length >= 2
-            # Array.new(n, val) - check if float
+            # Array.new(n, val) - check fill value type
             vt = infer_type(aargs[1])
             if vt == "float"
               @needs_float_array = 1
               tmp = new_temp
               emit("  sp_FloatArray *" + tmp + " = sp_FloatArray_new();")
               emit("  { mrb_int _n = " + compile_expr(aargs.first) + "; mrb_float _v = " + compile_expr(aargs[1]) + "; for (mrb_int _i = 0; _i < _n; _i++) sp_FloatArray_push(" + tmp + ", _v); }")
+              return tmp
+            end
+            if vt == "string"
+              @needs_str_array = 1
+              tmp = new_temp
+              emit("  sp_StrArray *" + tmp + " = sp_StrArray_new();")
+              emit("  { mrb_int _n = " + compile_expr(aargs.first) + "; const char *_v = " + compile_expr(aargs[1]) + "; for (mrb_int _i = 0; _i < _n; _i++) sp_StrArray_push(" + tmp + ", _v); }")
               return tmp
             end
             @needs_int_array = 1
