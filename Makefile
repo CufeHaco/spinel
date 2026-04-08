@@ -83,14 +83,19 @@ build/sp_bigint.o: lib/sp_bigint.c lib/sp_bigint.h lib/mruby_shim.h
 	@mkdir -p build
 	$(CC) -c -O2 -Wno-all -Ilib lib/sp_bigint.c -o build/sp_bigint.o
 
-test: spinel_parse build/sp_bigint.o $(RE_LIB)
+BI_LIB = lib/libspbi.a
+
+$(BI_LIB): build/sp_bigint.o
+	ar rcs $@ $^
+
+test: spinel_parse $(BI_LIB) $(RE_LIB)
 	@if [ ! -f spinel_codegen ]; then echo "Run 'make bootstrap' first"; exit 1; fi
 	@pass=0; fail=0; err=0; \
 	for f in test/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
 	  ./spinel_parse "$$f" /tmp/_sp_t.ast 2>/dev/null && \
 	  ./spinel_codegen /tmp/_sp_t.ast /tmp/_sp_t.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) /tmp/_sp_t.c build/sp_bigint.o $(RE_LIB) -lm -o /tmp/_sp_t_bin 2>/dev/null; \
+	  $(CC) $(CFLAGS) /tmp/_sp_t.c $(BI_LIB) $(RE_LIB) -lm -o /tmp/_sp_t_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 10 ruby "$$f" 2>/dev/null); \
 	    actual=$$(timeout 10 /tmp/_sp_t_bin 2>/dev/null); \
@@ -106,14 +111,14 @@ test: spinel_parse build/sp_bigint.o $(RE_LIB)
 	rm -f /tmp/_sp_t.ast /tmp/_sp_t.c /tmp/_sp_t_bin; \
 	echo "Tests: $$pass pass, $$fail fail, $$err error"
 
-bench: spinel_parse build/sp_bigint.o $(RE_LIB)
+bench: spinel_parse $(BI_LIB) $(RE_LIB)
 	@if [ ! -f spinel_codegen ]; then echo "Run 'make bootstrap' first"; exit 1; fi
 	@pass=0; fail=0; skip=0; \
 	for f in benchmark/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
 	  timeout 10 ./spinel_parse "$$f" /tmp/_sp_b.ast 2>/dev/null && \
 	  timeout 10 ./spinel_codegen /tmp/_sp_b.ast /tmp/_sp_b.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) /tmp/_sp_b.c build/sp_bigint.o $(RE_LIB) -lm -o /tmp/_sp_b_bin 2>/dev/null; \
+	  $(CC) $(CFLAGS) /tmp/_sp_b.c $(BI_LIB) $(RE_LIB) -lm -o /tmp/_sp_b_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 60 ruby "$$f" 2>/dev/null); \
 	    ruby_rc=$$?; \
