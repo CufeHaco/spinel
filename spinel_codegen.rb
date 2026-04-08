@@ -9076,7 +9076,11 @@ class Compiler
                         types[ki] = types[ki] + "?"
                       end
                     elsif types[ki] == "nil" && is_nullable_pointer_type(at) == 1
-                      types[ki] = at + "?"
+                      if is_nullable_type(at) == 1
+                        types[ki] = at
+                      else
+                        types[ki] = at + "?"
+                      end
                     elsif base_type(types[ki]) == at
                       # T? and T are compatible — keep T?
                     elsif base_type(at) == types[ki]
