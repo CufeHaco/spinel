@@ -1775,7 +1775,7 @@ class Compiler
     end
     if mname == "map"
       if recv >= 0
-        # Check block body return type to determine result array type
+        # Determine result array type from block return type
         blk = @nd_block[nid]
         if blk >= 0
           bbody = @nd_body[blk]
@@ -1785,6 +1785,15 @@ class Compiler
               bret = infer_type(bbs.last)
               if bret == "string"
                 return "str_array"
+              end
+              if bret == "float"
+                return "float_array"
+              end
+              if bret == "int"
+                return "int_array"
+              end
+              if is_obj_type(bret) == 1
+                return bret + "_ptr_array"
               end
             end
           end
