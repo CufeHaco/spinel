@@ -1614,6 +1614,15 @@ class Compiler
       end
       return "int"
     end
+    if mname == "fetch"
+      if recv >= 0
+        rt = infer_type(recv)
+        if rt == "str_str_hash"
+          return "string"
+        end
+      end
+      return "int"
+    end
     if mname == "has_key?" || mname == "key?"
       return "bool"
     end
@@ -12206,6 +12215,18 @@ class Compiler
       if mname == "values"
         return "sp_StrIntHash_values(" + rc + ")"
       end
+      if mname == "fetch"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          key = compile_expr(aargs[0])
+          if aargs.length >= 2
+            defval = compile_expr(aargs[1])
+            return "(sp_StrIntHash_has_key(" + rc + ", " + key + ") ? sp_StrIntHash_get(" + rc + ", " + key + ") : " + defval + ")"
+          end
+          return "sp_StrIntHash_get(" + rc + ", " + key + ")"
+        end
+      end
       if mname == "merge"
         tmp = new_temp
         arg = compile_arg0(nid)
@@ -12250,6 +12271,18 @@ class Compiler
       end
       if mname == "values"
         return "sp_StrStrHash_values(" + rc + ")"
+      end
+      if mname == "fetch"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          key = compile_expr(aargs[0])
+          if aargs.length >= 2
+            defval = compile_expr(aargs[1])
+            return "(sp_StrStrHash_has_key(" + rc + ", " + key + ") ? sp_StrStrHash_get(" + rc + ", " + key + ") : " + defval + ")"
+          end
+          return "sp_StrStrHash_get(" + rc + ", " + key + ")"
+        end
       end
     end
     ""
