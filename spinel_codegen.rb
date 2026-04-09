@@ -9261,7 +9261,7 @@ class Compiler
                   end
                   if mname == "times" || mname == "upto" || mname == "downto"
                     types.push("int")
-                  elsif mname == "each" || mname == "map" || mname == "select" || mname == "reject" || mname == "find" || mname == "detect" || mname == "any?" || mname == "all?" || mname == "none?" || mname == "count" || mname == "min_by" || mname == "max_by" || mname == "sort_by" || mname == "flat_map"
+                  elsif mname == "each" || mname == "each_pair" || mname == "map" || mname == "select" || mname == "reject" || mname == "find" || mname == "detect" || mname == "any?" || mname == "all?" || mname == "none?" || mname == "count" || mname == "min_by" || mname == "max_by" || mname == "sort_by" || mname == "flat_map"
                     # Element iteration: infer block param from collection type
                     if recv_type == "str_array"
                       types.push("string")
@@ -14494,7 +14494,7 @@ class Compiler
 
   def compile_block_iteration_stmt(nid, mname, recv)
     # each with block
-    if mname == "each"
+    if mname == "each" || (mname == "each_pair" && recv >= 0)
       if @nd_block[nid] >= 0
         # For object types with yield-using each, use yield method call
         if recv >= 0
