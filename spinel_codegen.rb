@@ -1739,7 +1739,7 @@ class Compiler
       end
       return "int"
     end
-    if mname == "take" || mname == "drop"
+    if mname == "take" || mname == "drop" || mname == "rotate"
       if recv >= 0
         return infer_type(recv)
       end
@@ -11972,6 +11972,21 @@ class Compiler
       emit("  " + c_type(recv_type) + tmp + " = sp_" + pfx + "_new();")
       emit("  for (mrb_int " + itmp + " = " + n + "; " + itmp + " < sp_" + pfx + "_length(" + rc + "); " + itmp + "++)")
       emit("    sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + rc + ", " + itmp + "));")
+      return tmp
+    end
+    if mname == "rotate"
+      pfx = array_c_prefix(recv_type)
+      n = compile_arg0(nid)
+      if n == "0"
+        n = "1"
+      end
+      tmp = new_temp
+      itmp = new_temp
+      len_tmp = new_temp
+      emit("  mrb_int " + len_tmp + " = sp_" + pfx + "_length(" + rc + ");")
+      emit("  " + c_type(recv_type) + tmp + " = sp_" + pfx + "_new();")
+      emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < " + len_tmp + "; " + itmp + "++)")
+      emit("    sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + rc + ", ((" + itmp + " + " + n + ") % " + len_tmp + " + " + len_tmp + ") % " + len_tmp + "));")
       return tmp
     end
     if mname == "sample"
