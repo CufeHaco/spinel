@@ -1485,6 +1485,9 @@ class Compiler
     if mname == "downcase"
       return "string"
     end
+    if mname == "swapcase"
+      return "string"
+    end
     if mname == "strip"
       return "string"
     end
@@ -11610,6 +11613,9 @@ class Compiler
     end
     if mname == "downcase"
       return "sp_str_downcase(" + rc + ")"
+    end
+    if mname == "swapcase"
+      return "sp_str_swapcase(" + rc + ")"
     end
     if mname == "strip"
       return "sp_str_strip(" + rc + ")"
