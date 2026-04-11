@@ -14641,6 +14641,30 @@ class Compiler
       end
     end
 
+    # store (Hash): equivalent to []=
+    if mname == "store"
+      if recv >= 0
+        rt = infer_type(recv)
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length >= 2
+            rc = compile_expr(recv)
+            key = compile_expr(aargs[0])
+            val = compile_expr(aargs[1])
+            if rt == "str_int_hash"
+              emit("  sp_StrIntHash_set(" + rc + ", " + key + ", " + val + ");")
+              return 1
+            end
+            if rt == "str_str_hash"
+              emit("  sp_StrStrHash_set(" + rc + ", " + key + ", " + val + ");")
+              return 1
+            end
+          end
+        end
+      end
+    end
+
     # delete
     if mname == "delete"
       if recv >= 0
@@ -18049,7 +18073,7 @@ class Compiler
     lt = @nd_type[last]
     if lt == "CallNode"
       lm = @nd_name[last]
-      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw" || lm == "puts" || lm == "print" || lm == "p" || lm == "printf" || lm == "warn" || lm == "raise" || lm == "exit" || lm == "sleep" || lm == "delete" || lm == "clear" || lm == "concat" || lm == "prepend" || lm == "fill" || lm == "insert" || lm == "update" || lm == "merge!" || lm == "reverse!" || lm == "sort!" || lm == "each" || lm == "times" || lm == "upto" || lm == "downto"
+      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw" || lm == "puts" || lm == "print" || lm == "p" || lm == "printf" || lm == "warn" || lm == "raise" || lm == "exit" || lm == "sleep" || lm == "delete" || lm == "clear" || lm == "concat" || lm == "prepend" || lm == "fill" || lm == "insert" || lm == "update" || lm == "merge!" || lm == "store" || lm == "reverse!" || lm == "sort!" || lm == "each" || lm == "times" || lm == "upto" || lm == "downto"
         compile_stmt(last)
         if return_type != "void"
           emit("  return " + c_return_default(return_type) + ";")
