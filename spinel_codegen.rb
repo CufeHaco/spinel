@@ -1739,6 +1739,12 @@ class Compiler
     if mname == "digits"
       return "int_array"
     end
+    if mname == "bit_length"
+      return "int"
+    end
+    if mname == "fdiv"
+      return "float"
+    end
     if mname == "tally"
       return "str_int_hash"
     end
@@ -12022,6 +12028,13 @@ class Compiler
         end
       end
       return "sp_int_digits(" + rc + ", " + base + ")"
+    end
+    if mname == "bit_length"
+      # Number of bits needed to represent the integer (excluding sign)
+      return "((" + rc + ") < 0 ? (64 - __builtin_clzll((uint64_t)~(" + rc + "))) : ((" + rc + ") == 0 ? 0 : (64 - __builtin_clzll((uint64_t)(" + rc + ")))))"
+    end
+    if mname == "fdiv"
+      return "((mrb_float)(" + rc + ") / (mrb_float)" + compile_arg0(nid) + ")"
     end
     if mname == "to_i"
       return rc
