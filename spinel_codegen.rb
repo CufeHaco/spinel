@@ -1697,7 +1697,7 @@ class Compiler
     if mname == "size"
       return "int"
     end
-    if mname == "index" || mname == "find_index"
+    if mname == "index" || mname == "find_index" || mname == "rindex"
       return "int"
     end
     if mname == "keys"
@@ -12144,6 +12144,11 @@ class Compiler
           return "sp_IntArray_index(" + rc + ", " + compile_arg0(nid) + ")"
         end
       end
+      if mname == "rindex"
+        if @nd_arguments[nid] >= 0
+          return "sp_IntArray_rindex(" + rc + ", " + compile_arg0(nid) + ")"
+        end
+      end
       if mname == "sort"
         return "sp_IntArray_sort(" + rc + ")"
       end
@@ -12372,6 +12377,11 @@ class Compiler
       if mname == "index" || mname == "find_index"
         if @nd_arguments[nid] >= 0
           return "sp_StrArray_index(" + rc + ", " + compile_arg0(nid) + ")"
+        end
+      end
+      if mname == "rindex"
+        if @nd_arguments[nid] >= 0
+          return "sp_StrArray_rindex(" + rc + ", " + compile_arg0(nid) + ")"
         end
       end
       if mname == "count"
