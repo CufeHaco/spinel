@@ -11796,9 +11796,35 @@ class Compiler
       return "sp_str_include(" + rc + ", " + compile_arg0(nid) + ")"
     end
     if mname == "start_with?"
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        if aargs.length > 1
+          parts = "".split(",")
+          k = 0
+          while k < aargs.length
+            parts.push("sp_str_start_with(" + rc + ", " + compile_expr(aargs[k]) + ")")
+            k = k + 1
+          end
+          return "(" + parts.join(" || ") + ")"
+        end
+      end
       return "sp_str_start_with(" + rc + ", " + compile_arg0(nid) + ")"
     end
     if mname == "end_with?"
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        if aargs.length > 1
+          parts = "".split(",")
+          k = 0
+          while k < aargs.length
+            parts.push("sp_str_end_with(" + rc + ", " + compile_expr(aargs[k]) + ")")
+            k = k + 1
+          end
+          return "(" + parts.join(" || ") + ")"
+        end
+      end
       return "sp_str_end_with(" + rc + ", " + compile_arg0(nid) + ")"
     end
     if mname == "split"
