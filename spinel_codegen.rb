@@ -1834,20 +1834,21 @@ class Compiler
       end
       return "int_array"
     end
-    if mname == "first"
+    if mname == "first" || mname == "last"
       if recv >= 0
         rt = infer_type(recv)
+        # With arg → returns array of same type
+        if @nd_arguments[nid] >= 0
+          aargs = get_args(@nd_arguments[nid])
+          if aargs.length > 0
+            return rt
+          end
+        end
         if rt == "str_array"
           return "string"
         end
-      end
-      return "int"
-    end
-    if mname == "last"
-      if recv >= 0
-        rt = infer_type(recv)
-        if rt == "str_array"
-          return "string"
+        if rt == "float_array"
+          return "float"
         end
       end
       return "int"
@@ -12191,6 +12192,35 @@ class Compiler
     # Skip non-array types
     if recv_type == "str_int_hash" || recv_type == "str_str_hash"
       return ""
+    end
+    # first(n) / last(n) with argument: return new array
+    if mname == "first" && @nd_arguments[nid] >= 0
+      aargs = get_args(@nd_arguments[nid])
+      if aargs.length > 0
+        pfx = array_c_prefix(recv_type)
+        n = compile_expr(aargs[0])
+        tmp = new_temp
+        itmp = new_temp
+        emit("  " + c_type(recv_type) + " " + tmp + " = sp_" + pfx + "_new();")
+        emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < " + n + " && " + itmp + " < sp_" + pfx + "_length(" + rc + "); " + itmp + "++)")
+        emit("    sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + rc + ", " + itmp + "));")
+        return tmp
+      end
+    end
+    if mname == "last" && @nd_arguments[nid] >= 0
+      aargs = get_args(@nd_arguments[nid])
+      if aargs.length > 0
+        pfx = array_c_prefix(recv_type)
+        n = compile_expr(aargs[0])
+        tmp = new_temp
+        itmp = new_temp
+        len_tmp = new_temp
+        emit("  mrb_int " + len_tmp + " = sp_" + pfx + "_length(" + rc + ");")
+        emit("  " + c_type(recv_type) + " " + tmp + " = sp_" + pfx + "_new();")
+        emit("  for (mrb_int " + itmp + " = (" + len_tmp + " - " + n + " < 0 ? 0 : " + len_tmp + " - " + n + "); " + itmp + " < " + len_tmp + "; " + itmp + "++)")
+        emit("    sp_" + pfx + "_push(" + tmp + ", sp_" + pfx + "_get(" + rc + ", " + itmp + "));")
+        return tmp
+      end
     end
     # Common array methods (all array types)
     if mname == "take"
