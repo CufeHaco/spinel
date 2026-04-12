@@ -15295,6 +15295,37 @@ class Compiler
       end
     end
 
+    if mname == "step"
+      if @nd_block[nid] >= 0 && recv >= 0
+        old = @in_loop
+        @in_loop = 1
+        rc = compile_expr(recv)
+        args_id = @nd_arguments[nid]
+        limit_val = "0"
+        step_val = "1"
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length > 0
+            limit_val = compile_expr(aargs[0])
+          end
+          if aargs.length > 1
+            step_val = compile_expr(aargs[1])
+          end
+        end
+        bp1 = get_block_param(nid, 0)
+        if bp1 == ""
+          bp1 = "_i"
+        end
+        emit("  for (lv_" + bp1 + " = " + rc + "; lv_" + bp1 + " <= " + limit_val + "; lv_" + bp1 + " += " + step_val + ") {")
+        @indent = @indent + 1
+        compile_stmts_body(@nd_body[@nd_block[nid]])
+        @indent = @indent - 1
+        emit("  }")
+        @in_loop = old
+        return 1
+      end
+    end
+
     if mname == "cycle"
       if @nd_block[nid] >= 0 && recv >= 0
         old = @in_loop
