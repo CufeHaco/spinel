@@ -165,6 +165,7 @@ static void sp_StrStrHash_update(sp_StrStrHash*a,sp_StrStrHash*b){for(mrb_int i=
 
 static const char*sp_str_concat(const char*a,const char*b){size_t la=strlen(a),lb=strlen(b);char*r=(char*)malloc(la+lb+1);memcpy(r,a,la);memcpy(r+la,b,lb+1);return r;}
 static const char*sp_int_to_s(mrb_int n){char*b=(char*)malloc(32);snprintf(b,32,"%lld",(long long)n);return b;}
+static const char*sp_int_to_s_base(mrb_int n,mrb_int base){if(base<2||base>36)base=10;char*b=(char*)malloc(72);char tmp[72];int i=0;int neg=0;uint64_t u;if(n<0){neg=1;u=(uint64_t)(-(n+1))+1;}else{u=(uint64_t)n;}if(u==0){tmp[i++]='0';}else{while(u>0){mrb_int d=u%base;tmp[i++]=d<10?'0'+d:'a'+d-10;u/=base;}}int j=0;if(neg)b[j++]='-';while(i>0)b[j++]=tmp[--i];b[j]=0;return b;}
 static const char*sp_float_to_s(mrb_float f){char*b=(char*)malloc(64);snprintf(b,64,"%g",f);return b;}
 static const char*sp_str_upcase(const char*s){size_t l=strlen(s);char*r=(char*)malloc(l+1);for(size_t i=0;i<=l;i++)r[i]=toupper((unsigned char)s[i]);return r;}
 static const char*sp_str_downcase(const char*s){size_t l=strlen(s);char*r=(char*)malloc(l+1);for(size_t i=0;i<=l;i++)r[i]=tolower((unsigned char)s[i]);return r;}

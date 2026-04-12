@@ -12073,6 +12073,12 @@ class Compiler
   def compile_int_method_expr(nid, mname, rc)
     if mname == "to_s"
       @needs_string_helpers = 1
+      if @nd_arguments[nid] >= 0
+        aargs = get_args(@nd_arguments[nid])
+        if aargs.length > 0
+          return "sp_int_to_s_base(" + rc + ", " + compile_expr(aargs[0]) + ")"
+        end
+      end
       return "sp_int_to_s(" + rc + ")"
     end
     if mname == "digits"
