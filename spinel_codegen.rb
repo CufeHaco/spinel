@@ -1672,8 +1672,8 @@ class Compiler
       end
       return "int_array"
     end
-    if mname == "to_sym"
-      return "string"
+    if mname == "to_sym" || mname == "intern"
+      return "symbol"
     end
     if mname == "lstrip"
       return "string"
@@ -7647,10 +7647,15 @@ class Compiler
       line = line + "};"
       emit_raw(line)
     end
+    # Dynamic intern pool: symbols created via String#to_sym at runtime.
+    # IDs beyond SP_SYM_COUNT index into this pool.
+    emit_raw("static const char **sp_sym_dyn_names = NULL;")
+    emit_raw("static mrb_int sp_sym_dyn_count = 0;")
+    emit_raw("static mrb_int sp_sym_dyn_cap = 0;")
     emit_raw("static sp_sym sp_sym_intern(const char *s) __attribute__((unused));")
-    emit_raw("static sp_sym sp_sym_intern(const char *s){mrb_int i;for(i=0;i<SP_SYM_COUNT;i++){if(strcmp(sp_sym_names[i],s)==0)return i;}return -1;}")
+    emit_raw("static sp_sym sp_sym_intern(const char *s){mrb_int i;for(i=0;i<SP_SYM_COUNT;i++){if(strcmp(sp_sym_names[i],s)==0)return (sp_sym)i;}for(i=0;i<sp_sym_dyn_count;i++){if(strcmp(sp_sym_dyn_names[i],s)==0)return (sp_sym)(SP_SYM_COUNT+i);}if(sp_sym_dyn_count>=sp_sym_dyn_cap){sp_sym_dyn_cap=sp_sym_dyn_cap?sp_sym_dyn_cap*2:8;sp_sym_dyn_names=(const char**)realloc(sp_sym_dyn_names,sizeof(char*)*sp_sym_dyn_cap);}{size_t sl=strlen(s);char*dup=(char*)malloc(sl+1);memcpy(dup,s,sl+1);sp_sym_dyn_names[sp_sym_dyn_count]=dup;}return (sp_sym)(SP_SYM_COUNT+sp_sym_dyn_count++);}")
     emit_raw("static const char *sp_sym_to_s(sp_sym id) __attribute__((unused));")
-    emit_raw("static const char *sp_sym_to_s(sp_sym id){if(id<0||id>=SP_SYM_COUNT)return \"\";return sp_sym_names[id];}")
+    emit_raw("static const char *sp_sym_to_s(sp_sym id){if(id<0)return \"\";if(id<SP_SYM_COUNT)return sp_sym_names[id];mrb_int idx=(mrb_int)id-SP_SYM_COUNT;if(idx>=sp_sym_dyn_count)return \"\";return sp_sym_dyn_names[idx];}")
     # Emit SPS_<name> defines for symbols that form valid C identifiers.
     i = 0
     while i < @sym_names.length
@@ -11419,6 +11424,14 @@ class Compiler
       end
     end
 
+    # Symbol methods
+    if recv_type == "symbol"
+      r = compile_symbol_method_expr(nid, mname, rc)
+      if r != ""
+        return r
+      end
+    end
+
     # Mutable string methods: delegate to string methods via ->data
     if recv_type == "mutable_str"
       if mname == "length" || mname == "size"
@@ -12628,8 +12641,8 @@ class Compiler
     if mname == "frozen?"
       return "TRUE"
     end
-    if mname == "to_sym"
-      return rc
+    if mname == "to_sym" || mname == "intern"
+      return "sp_sym_intern(" + rc + ")"
     end
     if mname == "ord"
       return "((mrb_int)(unsigned char)" + rc + "[0])"
@@ -12759,6 +12772,57 @@ class Compiler
     end
     if mname == "size"
       return "(" + rc + ".last - " + rc + ".first + 1)"
+    end
+    ""
+  end
+
+  # Symbol methods. rc is a sp_sym expression.
+  def compile_symbol_method_expr(nid, mname, rc)
+    if mname == "to_s" || mname == "id2name" || mname == "name"
+      return "sp_sym_to_s(" + rc + ")"
+    end
+    if mname == "to_sym" || mname == "intern"
+      return rc
+    end
+    if mname == "inspect"
+      @needs_string_helpers = 1
+      return "sp_str_concat(\":\", sp_sym_to_s(" + rc + "))"
+    end
+    if mname == "length" || mname == "size"
+      return "((mrb_int)strlen(sp_sym_to_s(" + rc + ")))"
+    end
+    if mname == "empty?"
+      return "(sp_sym_to_s(" + rc + ")[0] == 0)"
+    end
+    if mname == "hash"
+      return "((mrb_int)" + rc + ")"
+    end
+    if mname == "==" || mname == "eql?"
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        if aargs.length >= 1
+          at = infer_type(aargs[0])
+          if at == "symbol"
+            return "(" + rc + " == " + compile_expr(aargs[0]) + ")"
+          end
+          # Symbol != anything-non-symbol in Ruby
+          return "FALSE"
+        end
+      end
+    end
+    if mname == "!="
+      args_id = @nd_arguments[nid]
+      if args_id >= 0
+        aargs = get_args(args_id)
+        if aargs.length >= 1
+          at = infer_type(aargs[0])
+          if at == "symbol"
+            return "(" + rc + " != " + compile_expr(aargs[0]) + ")"
+          end
+          return "TRUE"
+        end
+      end
     end
     ""
   end
