@@ -85,41 +85,41 @@ Geometric mean: **~49x faster** than CRuby across 50 benchmarks.
 
 | Benchmark | Spinel | CRuby | Speedup |
 |---|---|---|---|
-| ackermann | 5 ms | 394 ms | **78.8x** |
-| fib (recursive) | 11 ms | 560 ms | **50.9x** |
-| mandelbrot | 24 ms | 1,187 ms | **49.5x** |
-| matmul | 9 ms | 329 ms | **36.6x** |
-| fasta (DNA seq gen) | 2 ms | 72 ms | **36.0x** |
-| fannkuch | 2 ms | 71 ms | **35.5x** |
-| nqueens | 777 ms | 24,912 ms | **32.1x** |
-| tarai | 16 ms | 423 ms | **26.4x** |
-| tak | 20 ms | 499 ms | **24.9x** |
-| sudoku | 6 ms | 148 ms | **24.7x** |
-| partial_sums | 81 ms | 1,282 ms | **15.8x** |
-| sieve | 38 ms | 435 ms | **11.4x** |
+| ackermann | 5 ms | 394 ms | 78.8x |
+| fib (recursive) | 11 ms | 560 ms | 50.9x |
+| mandelbrot | 24 ms | 1,187 ms | 49.5x |
+| matmul | 9 ms | 329 ms | 36.6x |
+| fasta (DNA seq gen) | 2 ms | 72 ms | 36.0x |
+| fannkuch | 2 ms | 71 ms | 35.5x |
+| nqueens | 777 ms | 24,912 ms | 32.1x |
+| tarai | 16 ms | 423 ms | 26.4x |
+| tak | 20 ms | 499 ms | 24.9x |
+| sudoku | 6 ms | 148 ms | 24.7x |
+| partial_sums | 81 ms | 1,282 ms | 15.8x |
+| sieve | 38 ms | 435 ms | 11.4x |
 
 ### Data Structures & GC
 
 | Benchmark | Spinel | CRuby | Speedup |
 |---|---|---|---|
-| rbtree (red-black tree) | 23 ms | 571 ms | **24.8x** |
-| splay tree | 14 ms | 241 ms | **17.2x** |
-| binary_trees | 11 ms | 105 ms | **9.5x** |
-| so_lists | 74 ms | 510 ms | **6.9x** |
-| linked_list | 101 ms | 455 ms | **4.5x** |
-| gcbench | 1,634 ms | 4,247 ms | **2.6x** |
+| rbtree (red-black tree) | 23 ms | 571 ms | 24.8x |
+| splay tree | 14 ms | 241 ms | 17.2x |
+| binary_trees | 11 ms | 105 ms | 9.5x |
+| so_lists | 74 ms | 510 ms | 6.9x |
+| linked_list | 101 ms | 455 ms | 4.5x |
+| gcbench | 1,634 ms | 4,247 ms | 2.6x |
 
 ### Real-World Programs
 
 | Benchmark | Spinel | CRuby | Speedup |
 |---|---|---|---|
-| bigint_fib (1000 digits) | 2 ms | 66 ms | **33.0x** |
-| pidigits (bigint) | 2 ms | 65 ms | **32.5x** |
-| str_concat | 2 ms | 67 ms | **33.5x** |
-| json_parse | 38 ms | 436 ms | **11.5x** |
-| template engine | 137 ms | 961 ms | **7.0x** |
-| io_wordcount | 26 ms | 153 ms | **5.9x** |
-| csv_process | 229 ms | 936 ms | **4.1x** |
+| bigint_fib (1000 digits) | 2 ms | 66 ms | 33.0x |
+| pidigits (bigint) | 2 ms | 65 ms | 32.5x |
+| str_concat | 2 ms | 67 ms | 33.5x |
+| json_parse | 38 ms | 436 ms | 11.5x |
+| template engine | 137 ms | 961 ms | 7.0x |
+| io_wordcount | 26 ms | 153 ms | 5.9x |
+| csv_process | 229 ms | 936 ms | 4.1x |
 
 ## Supported Ruby Features
 
