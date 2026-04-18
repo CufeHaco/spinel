@@ -78,7 +78,7 @@ gen2.c == gen3.c   (bootstrap loop closed)
 
 ## Benchmarks
 
-75 tests pass. 53 benchmarks pass.
+74 tests pass. 54 benchmarks pass.
 Geometric mean: **~49x faster** than CRuby across 50 benchmarks.
 
 ### Computation
@@ -118,6 +118,7 @@ Geometric mean: **~49x faster** than CRuby across 50 benchmarks.
 | pidigits (bigint) | 2 ms | 65 ms | 32.5x |
 | str_concat | 2 ms | 67 ms | 33.5x |
 | json_parse | 38 ms | 436 ms | 11.5x |
+| ao_render (ray tracer) | 409 ms | 3,674 ms | 9.0x |
 | template engine | 137 ms | 961 ms | 7.0x |
 | io_wordcount | 26 ms | 153 ms | 5.9x |
 | csv_process | 229 ms | 936 ms | 4.1x |
@@ -228,8 +229,8 @@ spinel_codegen.rb     Compiler backend: AST → C code (20,851 lines)
 lib/sp_runtime.h      Runtime library header (581 lines)
 lib/sp_bigint.c       Arbitrary precision integers (5,394 lines)
 lib/regexp/           Built-in regexp engine (1,626 lines)
-test/                 75 feature tests
-benchmark/            53 benchmarks
+test/                 74 feature tests
+benchmark/            54 benchmarks
 Makefile              Build automation
 ```
 
@@ -257,8 +258,8 @@ by inlining the referenced file.
 
 ```bash
 make              # build parser + regexp library + bootstrap compiler
-make test         # run 75 feature tests (requires bootstrap)
-make bench        # run 53 benchmarks (requires bootstrap)
+make test         # run 74 feature tests (requires bootstrap)
+make bench        # run 54 benchmarks (requires bootstrap)
 make bootstrap    # rebuild compiler from source
 sudo make install # install to /usr/local (spinel in PATH)
 make clean        # remove build artifacts
