@@ -8639,7 +8639,9 @@ class Compiler
       while i < @cls_names.length
         names = @cls_ivar_names[i].split(";")
         types = @cls_ivar_types[i].split(";")
-        if names.length > 0 && names.length <= 4
+        # Value-type candidates: small immutable scalar classes.
+        # Limit to 8 ivars so the struct stays register-friendly.
+        if names.length > 0 && names.length <= 8
           all_val = 1
           j = 0
           while j < types.length
