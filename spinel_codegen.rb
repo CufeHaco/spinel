@@ -18393,7 +18393,7 @@ class Compiler
       if at == "symbol"
         emit("  { putchar(':'); fputs(sp_sym_to_s(" + val + "), stdout); putchar('" + bsl_n + "'); }")
       elsif at == "string" || at == "string?"
-        emit("  { const char *_ps = " + val + "; if (_ps) { putchar('\"'); fputs(_ps, stdout); putchar('\"'); putchar('" + bsl_n + "'); } else { fputs(\"nil\", stdout); putchar('" + bsl_n + "'); } }")
+        emit("  { const char *_ps = (const char *)(" + val + "); if (_ps) { putchar('\"'); fputs(_ps, stdout); putchar('\"'); putchar('" + bsl_n + "'); } else { fputs(\"nil\", stdout); putchar('" + bsl_n + "'); } }")
       elsif at == "nil"
         emit("  fputs(\"nil\\n\", stdout);")
       else
@@ -18412,7 +18412,7 @@ class Compiler
       return
     end
     if at == "mutable_str"
-      emit("  { const char *_ps = " + val + "->data; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+      emit("  { const char *_ps = (const char *)(" + val + "->data); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
       return
     end
     if at == "int"
@@ -18428,7 +18428,7 @@ class Compiler
       return
     end
     if at == "string" || at == "string?"
-      emit("  { const char *_ps = " + val + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+      emit("  { const char *_ps = (const char *)(" + val + "); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
       return
     end
     emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
@@ -18457,7 +18457,7 @@ class Compiler
         next
       end
       if at == "mutable_str"
-        emit("  { const char *_ps = " + val + "->data; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+        emit("  { const char *_ps = (const char *)(" + val + "->data); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
         k = k + 1
         next
       end
@@ -18478,7 +18478,7 @@ class Compiler
           emit("  printf(\"%g" + bsl_n + "\", " + val + ");")
         else
           if at == "string" || at == "string?"
-            emit("  { const char *_ps = " + val + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+            emit("  { const char *_ps = (const char *)(" + val + "); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
           else
             if at == "bool"
               emit("  puts(" + val + " ? \"true\" : \"false\");")
@@ -18488,7 +18488,7 @@ class Compiler
                 owner = find_method_owner(find_class_idx(cname), "to_s")
                 if owner != ""
                   sv = "sp_" + owner + "_to_s(" + (owner == cname ? val : "(sp_" + owner + " *)" + val) + ")"
-                  emit("  { const char *_ps = " + sv + "; if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
+                  emit("  { const char *_ps = (const char *)(" + sv + "); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
                 else
                   emit("  printf(\"%lld" + bsl_n + "\", (long long)(mrb_int)" + val + ");")
                 end
