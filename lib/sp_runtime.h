@@ -5,9 +5,13 @@
 #ifdef __APPLE__
 /* getcontext/makecontext/swapcontext are gated behind _XOPEN_SOURCE on
    Darwin and marked deprecated since 10.6. _DARWIN_C_SOURCE re-enables
-   Darwin extensions (MAP_ANON, etc.) that _XOPEN_SOURCE alone would hide. */
+   Darwin extensions (MAP_ANON, etc.) that _XOPEN_SOURCE alone would hide.
+   Suppress the deprecation warning so -Werror builds pass — we knowingly
+   use these APIs because Spinel's Fiber implementation depends on them. */
 #define _XOPEN_SOURCE 600
 #define _DARWIN_C_SOURCE
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
 
 #include <stdio.h>
@@ -626,5 +630,9 @@ int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);
 int64_t sp_bigint_to_int(sp_Bigint *b);
 const char *sp_bigint_to_s(sp_Bigint *b);
 void sp_bigint_free(sp_Bigint *b);
+
+#ifdef __APPLE__
+#pragma clang diagnostic pop
+#endif
 
 #endif /* SP_RUNTIME_H */
