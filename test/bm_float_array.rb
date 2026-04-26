@@ -18,3 +18,10 @@ puts g.max       # 2.75
 h = [4.5]
 puts h.min       # 4.5
 puts h.max       # 4.5
+
+# Sum with a non-integer-valued result. The original PR's sum test
+# happened to use values whose total was 8.0 (an integer), so a stale
+# `infer_type(...sum...) == int` would silently truncate; this case
+# would print "4" instead of "4.5".
+s = [1.5, 2.5, 0.5]
+puts s.sum       # 4.5

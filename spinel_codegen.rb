@@ -2157,6 +2157,12 @@ class Compiler
       return "int"
     end
     if mname == "sum"
+      if recv >= 0
+        rt = infer_type(recv)
+        if rt == "float_array"
+          return "float"
+        end
+      end
       return "int"
     end
     if mname == "reverse"
