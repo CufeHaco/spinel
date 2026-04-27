@@ -119,9 +119,16 @@ fi
 BIN_FILE="${OUTPUT:-$BASENAME}"
 # Runtime library (bigint + regexp)
 SP_RT_LIB="$DIR/lib/libspinel_rt.a"
+# Dynamic features library (eval, bytematcher, threads)
+SP_DYN_LIB="$DIR/src/libspinel_dynamic.a"
 INCLUDE_FLAGS="-I$DIR/lib"
+INCLUDE_FLAGS="$INCLUDE_FLAGS -I$DIR/src"
 if [ -f "$SP_RT_LIB" ]; then
   EXTRA_FLAGS="$EXTRA_FLAGS $SP_RT_LIB"
+fi
+# Link dynamic library if needed
+if grep -q 'sp_full_init\|sp_eval\|sp_dynamic_send' "$C_FILE" 2>/dev/null && [ -f "$SP_DYN_LIB" ]; then
+  EXTRA_FLAGS="$EXTRA_FLAGS $SP_DYN_LIB"
 fi
 # Legacy: optional standalone regexp lib (retained for backward compat)
 RE_LIB="$DIR/lib/regexp/libspre.a"

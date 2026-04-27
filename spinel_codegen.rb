@@ -203,6 +203,9 @@ class Compiler
     # Fiber support
     @needs_fiber = 0
     @needs_bigint = 0
+    @needs_bytematcher = 0
+    @needs_eval = 0
+    @needs_threads = 0
     @fiber_counter = 0
     @fiber_funcs = ""
     @in_fiber_body = 0
@@ -7410,6 +7413,14 @@ class Compiler
     emit_raw("#include <ctype.h>")
     emit_raw("#include <stdarg.h>")
     emit_raw("#include <time.h>")
+    if @needs_bytematcher == 1
+      emit_raw("#include \"src/bytematcher.h\"")
+      emit_raw("#include \"src/bop_tracker.h\"")
+      emit_raw("#include \"src/vm.h\"")
+    end
+    if @needs_threads == 1
+      emit_raw("#include \"src/threads.h\"")
+    end
     emit_raw("")
     emit_raw("typedef int64_t mrb_int;")
     emit_raw("typedef double mrb_float;")
@@ -10740,6 +10751,9 @@ class Compiler
     if @needs_regexp == 1
       emit_raw("  sp_re_init();")
     end
+    if @needs_bytematcher == 1
+      emit_raw("  sp_full_init();")
+    end
 
     @in_main = 1
     @indent = 1
@@ -11942,6 +11956,31 @@ class Compiler
   def compile_call_expr(nid)
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
+
+    # eval - returns result to be assigned
+    if mname == "eval"
+      @needs_bytematcher = 1
+      @needs_eval = 1
+      args_nid = @nd_arguments[nid]
+      if args_nid >= 0
+        arg_ids = get_args(args_nid)
+        if arg_ids.length >= 1
+          expr_val = compile_expr(arg_ids[0])
+          return "sp_eval(" + expr_val + ", (int)strlen(" + expr_val + "))"
+        end
+      end
+      return "0"
+    end
+
+    # Thread.new(args) { block }
+    if mname == "new" && recv >= 0
+      if @nd_type[recv] == "ConstantReadNode"
+        if @nd_name[recv] == "Thread"
+          @needs_threads = 1
+          return "((sp_Thread*)0x1)"  # Stub placeholder
+        end
+      end
+    end
 
     # Fiber.new { block }
     if mname == "new" && recv >= 0
@@ -16818,13 +16857,31 @@ class Compiler
   end
 
 
-  def compile_call_stmt(nid)
+def compile_call_stmt(nid)
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
 
     # define_method is handled at collection time, skip at runtime
     if mname == "define_method"
       return
+    end
+
+    # eval - dynamic code execution via Bytematcher
+    if mname == "eval"
+      $stderr.puts "DEBUG: eval found in compile_call_stmt"
+      @needs_bytematcher = 1
+      @needs_eval = 1
+      args_nid = @nd_arguments[nid]
+      if args_nid >= 0
+        arg_ids = get_args(args_nid)
+        if arg_ids.length >= 1
+          expr_val = compile_expr(arg_ids[0])
+          emit("  { /* eval */")
+          emit("    mrb_int _eval_r = sp_eval(" + expr_val + ", (int)strlen(" + expr_val + "));")
+          emit("  }")
+          return
+        end
+      end
     end
 
     # IO: puts, print, printf

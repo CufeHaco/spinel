@@ -9,7 +9,7 @@
 #   make clean        Remove built binaries
 
 CC       ?= cc
-CFLAGS   = -O2 -Wno-all
+CFLAGS   = -O2 -Wno-all -Isrc
 # Per-function sections allow the linker to strip unused bigint/regexp
 # functions from the final binary (supported since GCC 2.7 / binutils 2.17).
 SEC_FLAGS = -ffunction-sections -fdata-sections

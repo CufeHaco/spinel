@@ -627,4 +627,9 @@ int64_t sp_bigint_to_int(sp_Bigint *b);
 const char *sp_bigint_to_s(sp_Bigint *b);
 void sp_bigint_free(sp_Bigint *b);
 
+/* Dynamic VM support */
+mrb_int sp_eval(const char *code, mrb_int len);
+mrb_int sp_dynamic_send(mrb_int receiver, mrb_int method_name, mrb_int *args, int argc);
+void sp_full_init(void);
+
 #endif /* SP_RUNTIME_H */
